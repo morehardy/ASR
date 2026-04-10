@@ -87,11 +87,10 @@ def _zero_or_flat_timestamp_ratio(tokens: Sequence[Token]) -> float:
         return 0.0
 
     flat_or_zero_count = sum(
-        1 for token in tokens if token.start_time == token.end_time
+        1 for token in tokens if token.end_time <= token.start_time
     )
     return flat_or_zero_count / len(tokens)
 
 
 def _joined_token_text(tokens: Sequence[Token]) -> str:
     return " ".join(token.text for token in tokens)
-
