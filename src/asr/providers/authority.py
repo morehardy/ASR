@@ -67,17 +67,28 @@ def project_timing_onto_transcript(
 def _find_forward_match(
     transcript_text: str, aligner_tokens: List[Token], start_index: int
 ) -> Optional[int]:
-    transcript_normalized = _normalize_match_text(transcript_text)
+    transcript_raw = transcript_text.lower()
     for index in range(start_index, len(aligner_tokens)):
         aligner_text = aligner_tokens[index].text
         if (
             SequenceMatcher(
                 None,
-                transcript_normalized,
-                _normalize_match_text(aligner_text),
+                transcript_raw,
+                aligner_text.lower(),
             ).ratio()
             >= 0.9
         ):
+            return index
+
+    # Conservative fallback: only strip sentence punctuation at token edges and require exact match.
+    transcript_fallback = _strip_edge_sentence_punctuation(transcript_raw)
+    if not transcript_fallback:
+        return None
+
+    for index in range(start_index, len(aligner_tokens)):
+        aligner_text = aligner_tokens[index].text
+        aligner_fallback = _strip_edge_sentence_punctuation(aligner_text.lower())
+        if transcript_fallback == aligner_fallback:
             return index
 
     return None
@@ -107,10 +118,12 @@ def _is_zh_language(language: Optional[str]) -> bool:
     return normalized.startswith("zh")
 
 
-_TRIM_EDGE_PUNCTUATION = re.compile(r"^\W+|\W+$", flags=re.UNICODE)
+_EDGE_SENTENCE_PUNCTUATION_RE = re.compile(
+    r"^[\s\"'`“”‘’.,!?;:，。！？；：、()\[\]{}<>《》「」『』…]+|[\s\"'`“”‘’.,!?;:，。！？；：、()\[\]{}<>《》「」『』…]+$",
+    flags=re.UNICODE,
+)
 
 
-def _normalize_match_text(text: str) -> str:
-    lowered = text.lower()
-    trimmed = _TRIM_EDGE_PUNCTUATION.sub("", lowered)
-    return trimmed or lowered
+def _strip_edge_sentence_punctuation(text: str) -> str:
+    stripped = _EDGE_SENTENCE_PUNCTUATION_RE.sub("", text)
+    return stripped or text

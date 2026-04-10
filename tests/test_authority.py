@@ -58,3 +58,18 @@ class AuthorityTest(unittest.TestCase):
         self.assertEqual(projected[-1].start_time, 17.12)
         self.assertEqual(projected[-1].end_time, 17.44)
         self.assertGreater(projected[-1].end_time, projected[-1].start_time)
+
+    def test_projection_fallback_does_not_strip_programming_symbols(self) -> None:
+        transcript_tokens = build_transcript_tokens("C++ C#", language="en")
+        aligner_tokens = [
+            Token("C", 1.00, 1.10, unit="token"),
+            Token("C", 1.10, 1.20, unit="token"),
+        ]
+
+        projected = project_timing_onto_transcript(transcript_tokens, aligner_tokens)
+
+        self.assertEqual([token.text for token in projected], ["C++", "C#"])
+        self.assertEqual(projected[0].start_time, 0.0)
+        self.assertEqual(projected[0].end_time, 0.0)
+        self.assertEqual(projected[1].start_time, 0.0)
+        self.assertEqual(projected[1].end_time, 0.0)
