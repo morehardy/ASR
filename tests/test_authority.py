@@ -42,3 +42,19 @@ class AuthorityTest(unittest.TestCase):
         tokens = build_transcript_tokens("你 好", language="zh")
 
         self.assertEqual([token.text for token in tokens], ["你", "好"])
+
+    def test_projection_matches_tokens_when_transcript_has_trailing_punctuation(self) -> None:
+        transcript_tokens = build_transcript_tokens("as a developer too.", language="en")
+        aligner_tokens = [
+            Token("as", 16.16, 16.40, unit="token"),
+            Token("a", 16.40, 16.48, unit="token"),
+            Token("developer", 16.48, 17.12, unit="token"),
+            Token("too", 17.12, 17.44, unit="token"),
+        ]
+
+        projected = project_timing_onto_transcript(transcript_tokens, aligner_tokens)
+
+        self.assertEqual([token.text for token in projected], ["as", "a", "developer", "too."])
+        self.assertEqual(projected[-1].start_time, 17.12)
+        self.assertEqual(projected[-1].end_time, 17.44)
+        self.assertGreater(projected[-1].end_time, projected[-1].start_time)

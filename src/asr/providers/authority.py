@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from difflib import SequenceMatcher
 from typing import List, Optional
 
@@ -66,10 +67,15 @@ def project_timing_onto_transcript(
 def _find_forward_match(
     transcript_text: str, aligner_tokens: List[Token], start_index: int
 ) -> Optional[int]:
+    transcript_normalized = _normalize_match_text(transcript_text)
     for index in range(start_index, len(aligner_tokens)):
         aligner_text = aligner_tokens[index].text
         if (
-            SequenceMatcher(None, transcript_text.lower(), aligner_text.lower()).ratio()
+            SequenceMatcher(
+                None,
+                transcript_normalized,
+                _normalize_match_text(aligner_text),
+            ).ratio()
             >= 0.9
         ):
             return index
@@ -99,3 +105,12 @@ def _is_zh_language(language: Optional[str]) -> bool:
         return False
     normalized = language.lower()
     return normalized.startswith("zh")
+
+
+_TRIM_EDGE_PUNCTUATION = re.compile(r"^\W+|\W+$", flags=re.UNICODE)
+
+
+def _normalize_match_text(text: str) -> str:
+    lowered = text.lower()
+    trimmed = _TRIM_EDGE_PUNCTUATION.sub("", lowered)
+    return trimmed or lowered

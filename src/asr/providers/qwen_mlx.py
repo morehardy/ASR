@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
@@ -51,6 +53,7 @@ class QwenMlxProvider:
         self._aligner_model: Optional[Any] = None
         self._active_audio_path: Optional[Path] = None
         self._silence_anchor_cache: dict[str, List[float]] = {}
+        self._context_clip_dir: Optional[Path] = None
 
     def transcribe(self, audio_path: Path) -> TranscriptionDocument:
         load = self._load_backend()
@@ -64,34 +67,42 @@ class QwenMlxProvider:
         finally:
             self._active_audio_path = None
 
-        if not windows:
+        self._begin_context_windowing()
+        try:
+            if not windows:
+                return self._build_document(
+                    audio_path=audio_path,
+                    total_duration_sec=total_duration_sec,
+                    windows=windows,
+                    window_runs=[],
+                    segments=[],
+                )
+
+            window_runs = [
+                self._execute_window(audio_path, window)
+                for window in windows
+            ]
+            self._evaluate_window_qualities(window_runs)
+            self._raise_if_all_windows_failed(window_runs)
+
+            merged_tokens = self._merge_window_runs(window_runs)
+            segments = self._tokens_to_segments(merged_tokens)
+            if not segments:
+                segments = self._fallback_segments_from_windows(window_runs)
+            segments = self._stabilize_segment_boundaries(
+                segments,
+                total_duration_sec=total_duration_sec,
+            )
+
             return self._build_document(
                 audio_path=audio_path,
                 total_duration_sec=total_duration_sec,
                 windows=windows,
-                window_runs=[],
-                segments=[],
+                window_runs=window_runs,
+                segments=segments,
             )
-
-        window_runs = [
-            self._execute_window(audio_path, window)
-            for window in windows
-        ]
-        self._evaluate_window_qualities(window_runs)
-        self._raise_if_all_windows_failed(window_runs)
-
-        merged_tokens = self._merge_window_runs(window_runs)
-        segments = self._tokens_to_segments(merged_tokens)
-        if not segments:
-            segments = self._fallback_segments_from_windows(window_runs)
-
-        return self._build_document(
-            audio_path=audio_path,
-            total_duration_sec=total_duration_sec,
-            windows=windows,
-            window_runs=window_runs,
-            segments=segments,
-        )
+        finally:
+            self._cleanup_context_windowing()
 
     def _plan_windows(self, total_duration_sec: float) -> List[AlignmentWindow]:
         planner = WindowPlanner(
@@ -291,16 +302,75 @@ class QwenMlxProvider:
         self._silence_anchor_cache[cache_key] = anchors
         return anchors
 
+    def _begin_context_windowing(self) -> None:
+        self._cleanup_context_windowing()
+        self._context_clip_dir = Path(tempfile.mkdtemp(prefix="asr-window-"))
+
+    def _cleanup_context_windowing(self) -> None:
+        if self._context_clip_dir is None:
+            return
+        shutil.rmtree(self._context_clip_dir, ignore_errors=True)
+        self._context_clip_dir = None
+
     def _context_input_path(self, audio_path: Path, window: AlignmentWindow) -> str:
-        return (
-            f"{audio_path}#t={window.context_start:.3f},{window.context_end:.3f}"
-        )
+        source = audio_path.expanduser().resolve()
+        if not source.exists():
+            return str(audio_path)
+
+        return str(self._materialize_window_clip(source, window))
+
+    def _materialize_window_clip(
+        self,
+        audio_path: Path,
+        window: AlignmentWindow,
+    ) -> Path:
+        if self._context_clip_dir is None:
+            self._context_clip_dir = Path(tempfile.mkdtemp(prefix="asr-window-"))
+
+        clip_path = self._context_clip_dir / f"window-{window.index:04d}.wav"
+        if clip_path.exists():
+            return clip_path
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{window.context_start:.3f}",
+            "-to",
+            f"{window.context_end:.3f}",
+            "-i",
+            str(audio_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(clip_path),
+        ]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg is required but was not found on PATH.") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                exc.stderr.strip() or "ffmpeg failed to extract bounded window audio."
+            ) from exc
+
+        return clip_path
 
     def _context_generate_kwargs(self, window: AlignmentWindow) -> dict[str, float]:
-        return {
-            "start_time": window.context_start,
-            "end_time": window.context_end,
-        }
+        _ = window
+        return {}
 
     def _build_authoritative_tokens(
         self,
@@ -577,6 +647,58 @@ class QwenMlxProvider:
                 )
             )
         return segments
+
+    def _stabilize_segment_boundaries(
+        self,
+        segments: List[Segment],
+        *,
+        total_duration_sec: float,
+        tail_padding_sec: float = 0.12,
+    ) -> List[Segment]:
+        if not segments:
+            return []
+
+        stabilized = [
+            Segment(
+                id=segment.id,
+                text=segment.text,
+                start_time=segment.start_time,
+                end_time=segment.end_time,
+                language=segment.language,
+                tokens=list(segment.tokens),
+                speaker=segment.speaker,
+            )
+            for segment in segments
+        ]
+
+        previous_end = 0.0
+        for segment in stabilized:
+            segment.start_time = max(0.0, segment.start_time)
+            segment.end_time = max(segment.start_time, segment.end_time)
+            if segment.start_time < previous_end:
+                segment.start_time = previous_end
+                segment.end_time = max(segment.end_time, segment.start_time)
+            previous_end = segment.end_time
+
+        for index, segment in enumerate(stabilized):
+            next_start = (
+                stabilized[index + 1].start_time
+                if index + 1 < len(stabilized)
+                else total_duration_sec
+            )
+            padded_end = segment.end_time + tail_padding_sec
+            segment.end_time = min(total_duration_sec, max(segment.end_time, min(padded_end, next_start)))
+            segment.end_time = max(segment.start_time, segment.end_time)
+
+        for index in range(len(stabilized) - 1):
+            if stabilized[index].end_time > stabilized[index + 1].start_time:
+                stabilized[index].end_time = stabilized[index + 1].start_time
+                stabilized[index].end_time = max(
+                    stabilized[index].start_time,
+                    stabilized[index].end_time,
+                )
+
+        return stabilized
 
     def _item_to_token(self, item: Any, language: Optional[str]) -> Token:
         text = str(getattr(item, "text", "")).strip()

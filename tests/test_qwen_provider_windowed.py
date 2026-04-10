@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from asr.models import Token
+from asr.models import Segment, Token
 from asr.providers.quality import QualityResult, QualityThresholds
 from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
 from asr.providers.windowing import AlignmentWindow
@@ -95,14 +95,14 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertGreaterEqual(metadata["window_count"], 2)
 
         for (audio_input, kwargs), diagnostic in zip(asr_model.calls, diagnostics):
-            self.assertIn("#t=", audio_input)
-            self.assertEqual(kwargs["start_time"], diagnostic["context_start"])
-            self.assertEqual(kwargs["end_time"], diagnostic["context_end"])
+            self.assertNotIn("#t=", audio_input)
+            self.assertNotIn("start_time", kwargs)
+            self.assertNotIn("end_time", kwargs)
 
         for (audio_input, kwargs), diagnostic in zip(align_model.calls, diagnostics):
-            self.assertIn("#t=", audio_input)
-            self.assertEqual(kwargs["start_time"], diagnostic["context_start"])
-            self.assertEqual(kwargs["end_time"], diagnostic["context_end"])
+            self.assertNotIn("#t=", audio_input)
+            self.assertNotIn("start_time", kwargs)
+            self.assertNotIn("end_time", kwargs)
             self.assertIn("quality", diagnostic)
 
         self.assertTrue(diagnostics[0]["quality"]["passed"])
@@ -331,6 +331,45 @@ class QwenProviderWindowedTest(unittest.TestCase):
 
         self.assertEqual(anchor, 148.5)
         self.assertEqual(run_mock.call_count, 1)
+
+    def test_stabilize_segments_removes_overlap_and_applies_small_tail_padding(self) -> None:
+        provider = QwenMlxProvider()
+        segments = [
+            Segment(
+                id="seg-1",
+                text="hello",
+                start_time=0.5,
+                end_time=1.0,
+                language="en",
+                tokens=[],
+            ),
+            Segment(
+                id="seg-2",
+                text="world",
+                start_time=0.8,
+                end_time=1.4,
+                language="en",
+                tokens=[],
+            ),
+            Segment(
+                id="seg-3",
+                text="tail",
+                start_time=2.0,
+                end_time=2.1,
+                language="en",
+                tokens=[],
+            ),
+        ]
+
+        stabilized = provider._stabilize_segment_boundaries(
+            segments,
+            total_duration_sec=2.2,
+        )
+
+        self.assertLessEqual(stabilized[0].end_time, stabilized[1].start_time)
+        self.assertGreaterEqual(stabilized[0].end_time, 0.8)
+        self.assertGreater(stabilized[2].end_time, 2.1)
+        self.assertLessEqual(stabilized[2].end_time, 2.2)
 
 
 if __name__ == "__main__":
