@@ -61,13 +61,14 @@ def merge_adjacent_windows(
     right_span: WindowSpan,
     max_time_delta: float = 0.25,
 ) -> list[Token]:
-    del left_span, right_span
-
     matched_right_indexes = {right_index for _, right_index in _dp_pairs(left_tokens, right_tokens, max_time_delta)}
 
     merged: list[Token] = list(left_tokens)
-    for right_index, token in enumerate(right_tokens):
-        if right_index in matched_right_indexes:
+    for idx, token in enumerate(right_tokens):
+        in_right_core = right_span.core_start <= token.start_time < right_span.core_end
+        if idx in matched_right_indexes and not in_right_core:
+            continue
+        if idx in matched_right_indexes:
             continue
         merged.append(token)
 
