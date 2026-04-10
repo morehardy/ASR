@@ -24,11 +24,15 @@ DEFAULT_ALIGNER_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
 @dataclass(slots=True)
 class WindowRun:
     window: AlignmentWindow
-    text: str
-    language: Optional[str]
-    tokens: List[Token]
-    core_tokens: List[Token]
-    quality: QualityResult
+    text: str = ""
+    language: Optional[str] = None
+    tokens: List[Token] = field(default_factory=list)
+    core_tokens: List[Token] = field(default_factory=list)
+    left_overlap_tokens: List[Token] = field(default_factory=list)
+    right_overlap_tokens: List[Token] = field(default_factory=list)
+    core_text: str = ""
+    quality: Optional[QualityResult] = None
+    error: Optional[str] = None
 
 
 @dataclass
@@ -52,7 +56,11 @@ class QwenMlxProvider:
 
         total_duration_sec = self._probe_duration_sec(audio_path)
         windows = self._plan_windows(total_duration_sec)
-        window_runs = [self._transcribe_window(audio_path, window) for window in windows]
+        window_runs = [
+            self._execute_window(audio_path, window)
+            for window in windows
+        ]
+        self._evaluate_window_qualities(window_runs)
 
         merged_tokens = self._merge_window_runs(window_runs)
         segments = self._tokens_to_segments(merged_tokens)
@@ -73,7 +81,10 @@ class QwenMlxProvider:
             "processing_strategy": "windowed_bounded_alignment",
             "window_count": len(windows),
             "duration_sec": total_duration_sec,
-            "quality_pass_count": sum(1 for run in window_runs if run.quality.passed),
+            "quality_pass_count": sum(
+                1 for run in window_runs if run.quality is not None and run.quality.passed
+            ),
+            "failed_window_count": sum(1 for run in window_runs if run.error is not None),
             "window_diagnostics": [
                 self._build_window_diagnostic(run) for run in window_runs
             ],
@@ -116,14 +127,6 @@ class QwenMlxProvider:
             self._split_window_tokens(global_tokens, window)
         )
         core_text = self._join_tokens(core_tokens) if core_tokens else text
-        quality = evaluate_quality(
-            tokens=global_tokens,
-            left_overlap_tokens=left_overlap_tokens,
-            right_overlap_tokens=right_overlap_tokens,
-            core_text=core_text,
-            context_text=text,
-            thresholds=self.quality_thresholds,
-        )
 
         return WindowRun(
             window=window,
@@ -131,8 +134,80 @@ class QwenMlxProvider:
             language=language,
             tokens=global_tokens,
             core_tokens=core_tokens,
-            quality=quality,
+            left_overlap_tokens=left_overlap_tokens,
+            right_overlap_tokens=right_overlap_tokens,
+            core_text=core_text,
         )
+
+    def _execute_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
+        try:
+            return self._transcribe_window(audio_path, window)
+        except Exception as exc:
+            return WindowRun(
+                window=window,
+                error=str(exc),
+            )
+
+    def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
+        successful_runs = [run for run in window_runs if run.error is None]
+
+        for index, window_run in enumerate(successful_runs):
+            left_overlap_tokens, right_overlap_tokens = self._quality_boundary_inputs(
+                successful_runs,
+                index,
+            )
+            window_run.quality = evaluate_quality(
+                tokens=window_run.tokens,
+                left_overlap_tokens=left_overlap_tokens,
+                right_overlap_tokens=right_overlap_tokens,
+                core_text=window_run.core_text or window_run.text,
+                context_text=window_run.text,
+                thresholds=self.quality_thresholds,
+            )
+
+    def _quality_boundary_inputs(
+        self,
+        window_runs: List[WindowRun],
+        index: int,
+    ) -> tuple[List[Token], List[Token]]:
+        comparisons: List[tuple[List[Token], List[Token]]] = []
+        current = window_runs[index]
+        previous = self._find_neighbor_run(window_runs, index, step=-1)
+        following = self._find_neighbor_run(window_runs, index, step=1)
+
+        if previous is not None:
+            comparisons.append(
+                (previous.right_overlap_tokens, current.left_overlap_tokens)
+            )
+        if following is not None:
+            comparisons.append(
+                (current.right_overlap_tokens, following.left_overlap_tokens)
+            )
+
+        left_tokens: List[Token] = []
+        right_tokens: List[Token] = []
+        for left_comparison, right_comparison in comparisons:
+            if not left_comparison or not right_comparison:
+                continue
+            left_tokens.extend(left_comparison)
+            right_tokens.extend(right_comparison)
+
+        return left_tokens, right_tokens
+
+    def _find_neighbor_run(
+        self,
+        window_runs: List[WindowRun],
+        index: int,
+        *,
+        step: int,
+    ) -> Optional[WindowRun]:
+        cursor = index + step
+        while 0 <= cursor < len(window_runs):
+            candidate = window_runs[cursor]
+            if candidate.tokens:
+                return candidate
+            cursor += step
+        return None
 
     def _load_backend(self):
         try:
@@ -213,28 +288,48 @@ class QwenMlxProvider:
         return left_overlap, core_tokens, right_overlap
 
     def _merge_window_runs(self, window_runs: List[WindowRun]) -> List[Token]:
-        tokenized_runs = [window_run for window_run in window_runs if window_run.tokens]
-        if not tokenized_runs:
-            return []
-
-        if not all(window_run.quality.passed for window_run in tokenized_runs):
-            return self._quality_fallback_tokens(tokenized_runs)
-
-        return self._merge_window_runs_with_overlap_resolution(tokenized_runs)
-
-    def _merge_window_runs_with_overlap_resolution(
-        self, window_runs: List[WindowRun]
-    ) -> List[Token]:
         merged_tokens: List[Token] = []
-        current_span: Optional[WindowSpan] = None
+        passing_block: List[WindowRun] = []
 
         for window_run in window_runs:
-            next_span = self._window_span(window_run.window)
-            if not merged_tokens or current_span is None:
-                merged_tokens = list(window_run.tokens)
-                current_span = next_span
+            if window_run.error is not None:
+                merged_tokens = self._append_tokens(
+                    merged_tokens,
+                    self._merge_passing_block(passing_block),
+                )
+                passing_block = []
                 continue
 
+            if window_run.quality is not None and window_run.quality.passed:
+                passing_block.append(window_run)
+                continue
+
+            merged_tokens = self._append_tokens(
+                merged_tokens,
+                self._merge_passing_block(passing_block),
+            )
+            passing_block = []
+            merged_tokens = self._append_tokens(
+                merged_tokens,
+                self._fallback_tokens_for_run(window_run),
+            )
+
+        return self._append_tokens(
+            merged_tokens,
+            self._merge_passing_block(passing_block),
+        )
+
+    def _merge_passing_block(self, window_runs: List[WindowRun]) -> List[Token]:
+        if not window_runs:
+            return []
+        if len(window_runs) == 1:
+            return self._fallback_tokens_for_run(window_runs[0])
+
+        merged_tokens: List[Token] = list(window_runs[0].tokens)
+        current_span = self._window_span(window_runs[0].window)
+
+        for window_run in window_runs[1:]:
+            next_span = self._window_span(window_run.window)
             merged_tokens = merge_adjacent_windows(
                 merged_tokens,
                 window_run.tokens,
@@ -243,19 +338,47 @@ class QwenMlxProvider:
             )
             current_span = next_span
 
-        return merged_tokens
+        owned_tokens = self._owned_tokens_for_block(merged_tokens, window_runs)
+        if owned_tokens:
+            return owned_tokens
 
-    def _quality_fallback_tokens(self, window_runs: List[WindowRun]) -> List[Token]:
-        merged_tokens: List[Token] = []
-
+        fallback_tokens: List[Token] = []
         for window_run in window_runs:
-            preferred_tokens = self._preferred_tokens_for_window(window_run)
-            for token in preferred_tokens:
-                if merged_tokens and self._same_token(merged_tokens[-1], token):
-                    continue
-                merged_tokens.append(token)
+            fallback_tokens = self._append_tokens(
+                fallback_tokens,
+                self._fallback_tokens_for_run(window_run),
+            )
+        return fallback_tokens
 
-        return merged_tokens
+    def _owned_tokens_for_block(
+        self,
+        tokens: List[Token],
+        window_runs: List[WindowRun],
+    ) -> List[Token]:
+        owned_tokens = [
+            token
+            for token in tokens
+            if any(
+                window_run.window.core_start <= token.start_time < window_run.window.core_end
+                for window_run in window_runs
+            )
+        ]
+        return owned_tokens
+
+    def _fallback_tokens_for_run(self, window_run: WindowRun) -> List[Token]:
+        return self._preferred_tokens_for_window(window_run)
+
+    def _append_tokens(self, existing: List[Token], new_tokens: List[Token]) -> List[Token]:
+        if not new_tokens:
+            return existing
+
+        merged = list(existing)
+        for token in new_tokens:
+            if merged and self._same_token(merged[-1], token):
+                continue
+            merged.append(token)
+
+        return merged
 
     def _preferred_tokens_for_window(self, window_run: WindowRun) -> List[Token]:
         if window_run.core_tokens:
@@ -280,29 +403,43 @@ class QwenMlxProvider:
         )
 
     def _build_window_diagnostic(self, window_run: WindowRun) -> dict[str, Any]:
-        return {
+        diagnostic = {
             "index": window_run.window.index,
+            "status": "failed" if window_run.error is not None else "completed",
             "core_start": window_run.window.core_start,
             "core_end": window_run.window.core_end,
             "context_start": window_run.window.context_start,
             "context_end": window_run.window.context_end,
             "token_count": len(window_run.tokens),
-            "quality": {
-                "passed": window_run.quality.passed,
-                "monotonic_timestamp_ratio": (
-                    window_run.quality.monotonic_timestamp_ratio
-                ),
-                "zero_or_flat_timestamp_ratio": (
-                    window_run.quality.zero_or_flat_timestamp_ratio
-                ),
-                "boundary_disagreement_score": (
-                    window_run.quality.boundary_disagreement_score
-                ),
-                "core_context_text_divergence": (
-                    window_run.quality.core_context_text_divergence
-                ),
-            },
         }
+        if window_run.error is not None:
+            diagnostic["error"] = window_run.error
+            return diagnostic
+
+        diagnostic["quality"] = {
+            "passed": window_run.quality.passed if window_run.quality is not None else False,
+            "monotonic_timestamp_ratio": (
+                window_run.quality.monotonic_timestamp_ratio
+                if window_run.quality is not None
+                else 0.0
+            ),
+            "zero_or_flat_timestamp_ratio": (
+                window_run.quality.zero_or_flat_timestamp_ratio
+                if window_run.quality is not None
+                else 1.0
+            ),
+            "boundary_disagreement_score": (
+                window_run.quality.boundary_disagreement_score
+                if window_run.quality is not None
+                else 1.0
+            ),
+            "core_context_text_divergence": (
+                window_run.quality.core_context_text_divergence
+                if window_run.quality is not None
+                else 1.0
+            ),
+        }
+        return diagnostic
 
     def _fallback_segments_from_windows(self, window_runs: List[WindowRun]) -> List[Segment]:
         segments: List[Segment] = []
