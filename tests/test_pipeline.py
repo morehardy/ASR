@@ -39,6 +39,45 @@ class FakeMediaPreparer:
         return source_path.with_suffix(".wav")
 
 
+class ContractProvider(Provider):
+    name = "contract"
+
+    def transcribe(self, audio_path: Path) -> TranscriptionDocument:
+        return TranscriptionDocument(
+            source_path=str(audio_path),
+            provider_name=self.name,
+            source_media={
+                "provider_metadata": {
+                    "processing_strategy": "windowed_bounded_alignment",
+                    "window_count": 3,
+                }
+            },
+            segments=[
+                Segment(
+                    id="seg-1",
+                    text="ok",
+                    start_time=0.0,
+                    end_time=0.3,
+                    language="en",
+                    tokens=[
+                        Token(
+                            text="ok",
+                            start_time=0.0,
+                            end_time=0.3,
+                            unit="token",
+                            language="en",
+                        )
+                    ],
+                )
+            ],
+        )
+
+
+class IdentityPreparer:
+    def prepare(self, source_path: Path) -> Path:
+        return source_path
+
+
 class PipelineTest(unittest.TestCase):
     def test_pipeline_uses_media_preparer_before_provider(self) -> None:
         document = process_media_file(
@@ -50,3 +89,14 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(document.source_path, "demo.mp4")
         self.assertEqual(document.source_media["prepared_audio_path"], "demo.wav")
         self.assertEqual(document.provider_name, "fake")
+
+    def test_pipeline_preserves_provider_metadata_and_full_media_contract(self) -> None:
+        document = process_media_file(
+            source_path=Path("clip.wav"),
+            provider=ContractProvider(),
+            media_preparer=IdentityPreparer(),
+        )
+
+        self.assertEqual(document.source_path, "clip.wav")
+        self.assertEqual(document.source_media["provider_metadata"]["window_count"], 3)
+        self.assertEqual(document.source_media["prepared_audio_path"], "clip.wav")

@@ -59,3 +59,4 @@ class ExporterTest(unittest.TestCase):
         self.assertIn("2\n00:00:00,300 --> 00:00:00,600\n好", srt_text)
         self.assertEqual(payload["granularity"], "token")
         self.assertEqual(payload["items"][1]["text"], "好")
+        self.assertIn("source_media", payload)
