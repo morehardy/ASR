@@ -23,6 +23,10 @@ def _match(a: Token, b: Token, max_time_delta: float) -> bool:
     )
 
 
+def _in_core(token: Token, span: WindowSpan) -> bool:
+    return span.core_start <= token.start_time < span.core_end
+
+
 def _dp_pairs(left: list[Token], right: list[Token], max_time_delta: float) -> list[tuple[int, int]]:
     left_len = len(left)
     right_len = len(right)
@@ -61,16 +65,31 @@ def merge_adjacent_windows(
     right_span: WindowSpan,
     max_time_delta: float = 0.25,
 ) -> list[Token]:
-    matched_right_indexes = {right_index for _, right_index in _dp_pairs(left_tokens, right_tokens, max_time_delta)}
+    matched_pairs = _dp_pairs(left_tokens, right_tokens, max_time_delta)
+    matched_right_indexes = {right_index for _, right_index in matched_pairs}
+    matched_right_by_left = {left_index: right_index for left_index, right_index in matched_pairs}
 
-    merged: list[Token] = list(left_tokens)
-    for idx, token in enumerate(right_tokens):
-        in_right_core = right_span.core_start <= token.start_time < right_span.core_end
-        if idx in matched_right_indexes and not in_right_core:
+    merged: list[Token] = []
+    for left_index, left_token in enumerate(left_tokens):
+        right_index = matched_right_by_left.get(left_index)
+        if right_index is None:
+            merged.append(left_token)
             continue
-        if idx in matched_right_indexes:
+
+        right_token = right_tokens[right_index]
+        left_in_core = _in_core(left_token, left_span)
+        right_in_core = _in_core(right_token, right_span)
+        if right_in_core:
+            merged.append(right_token)
+        elif left_in_core:
+            merged.append(left_token)
+        else:
+            merged.append(left_token)
+
+    for right_index, right_token in enumerate(right_tokens):
+        if right_index in matched_right_indexes:
             continue
-        merged.append(token)
+        merged.append(right_token)
 
     merged.sort(key=lambda token: (token.start_time, token.end_time))
     return merged
