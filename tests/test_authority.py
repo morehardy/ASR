@@ -21,3 +21,24 @@ class AuthorityTest(unittest.TestCase):
         self.assertEqual([token.text for token in transcript_tokens], ["I", "agree"])
         self.assertEqual([token.text for token in projected], ["I", "agree"])
 
+    def test_projection_preserves_forward_order_and_matching_timings(self) -> None:
+        transcript_tokens = build_transcript_tokens("abcdefghij abcdefghij", language="en")
+        aligner_tokens = [
+            Token("xbcdefghij", 0.0, 0.1, unit="token"),
+            Token("abcdefghij", 0.1, 0.2, unit="token"),
+        ]
+
+        projected = project_timing_onto_transcript(transcript_tokens, aligner_tokens)
+
+        self.assertEqual([token.text for token in projected], ["abcdefghij", "abcdefghij"])
+        self.assertEqual(
+            [(token.start_time, token.end_time) for token in projected],
+            [(0.0, 0.1), (0.1, 0.2)],
+        )
+        self.assertLess(projected[0].start_time, projected[1].start_time)
+        self.assertGreater(projected[1].end_time, projected[1].start_time)
+
+    def test_zh_tokenization_skips_whitespace(self) -> None:
+        tokens = build_transcript_tokens("你 好", language="zh")
+
+        self.assertEqual([token.text for token in tokens], ["你", "好"])

@@ -15,7 +15,7 @@ def build_transcript_tokens(text: str, language: Optional[str]) -> List[Token]:
 
     normalized_language = _normalize_language(language)
     if _is_zh_language(normalized_language):
-        units = list(stripped)
+        units = [char for char in stripped if not char.isspace()]
     else:
         units = stripped.split()
 
@@ -66,19 +66,15 @@ def project_timing_onto_transcript(
 def _find_forward_match(
     transcript_text: str, aligner_tokens: List[Token], start_index: int
 ) -> Optional[int]:
-    best_index: Optional[int] = None
-    best_ratio = 0.0
-
     for index in range(start_index, len(aligner_tokens)):
         aligner_text = aligner_tokens[index].text
-        ratio = SequenceMatcher(
-            None, transcript_text.lower(), aligner_text.lower()
-        ).ratio()
-        if ratio >= 0.9 and ratio > best_ratio:
-            best_index = index
-            best_ratio = ratio
+        if (
+            SequenceMatcher(None, transcript_text.lower(), aligner_text.lower()).ratio()
+            >= 0.9
+        ):
+            return index
 
-    return best_index
+    return None
 
 
 def _clone_token(token: Token) -> Token:
@@ -103,4 +99,3 @@ def _is_zh_language(language: Optional[str]) -> bool:
         return False
     normalized = language.lower()
     return normalized.startswith("zh")
-
