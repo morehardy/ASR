@@ -27,6 +27,7 @@ class WindowRun:
     text: str
     language: Optional[str]
     tokens: List[Token]
+    core_tokens: List[Token]
     quality: QualityResult
 
 
@@ -87,12 +88,14 @@ class QwenMlxProvider:
         return planner.plan(total_duration_sec)
 
     def _transcribe_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
-        context_input = self._build_context_input(audio_path, window)
-        transcription = self._asr_model.generate(context_input)
+        context_input = self._context_input_path(audio_path, window)
+        context_kwargs = self._context_generate_kwargs(window)
+        transcription = self._asr_model.generate(context_input, **context_kwargs)
         text = getattr(transcription, "text", "").strip()
         language = self._normalize_language(getattr(transcription, "language", None))
 
-        align_kwargs = {"text": text}
+        align_kwargs = dict(context_kwargs)
+        align_kwargs["text"] = text
         if language:
             align_kwargs["language"] = language
 
@@ -127,6 +130,7 @@ class QwenMlxProvider:
             text=text,
             language=language,
             tokens=global_tokens,
+            core_tokens=core_tokens,
             quality=quality,
         )
 
@@ -149,9 +153,16 @@ class QwenMlxProvider:
         del target_split_sec, search_start_sec, search_end_sec
         return None
 
-    def _build_context_input(self, audio_path: Path, window: AlignmentWindow) -> str:
-        del window
-        return str(audio_path)
+    def _context_input_path(self, audio_path: Path, window: AlignmentWindow) -> str:
+        return (
+            f"{audio_path}#t={window.context_start:.3f},{window.context_end:.3f}"
+        )
+
+    def _context_generate_kwargs(self, window: AlignmentWindow) -> dict[str, float]:
+        return {
+            "start_time": window.context_start,
+            "end_time": window.context_end,
+        }
 
     def _build_authoritative_tokens(
         self,
@@ -202,13 +213,22 @@ class QwenMlxProvider:
         return left_overlap, core_tokens, right_overlap
 
     def _merge_window_runs(self, window_runs: List[WindowRun]) -> List[Token]:
+        tokenized_runs = [window_run for window_run in window_runs if window_run.tokens]
+        if not tokenized_runs:
+            return []
+
+        if not all(window_run.quality.passed for window_run in tokenized_runs):
+            return self._quality_fallback_tokens(tokenized_runs)
+
+        return self._merge_window_runs_with_overlap_resolution(tokenized_runs)
+
+    def _merge_window_runs_with_overlap_resolution(
+        self, window_runs: List[WindowRun]
+    ) -> List[Token]:
         merged_tokens: List[Token] = []
         current_span: Optional[WindowSpan] = None
 
         for window_run in window_runs:
-            if not window_run.tokens:
-                continue
-
             next_span = self._window_span(window_run.window)
             if not merged_tokens or current_span is None:
                 merged_tokens = list(window_run.tokens)
@@ -224,6 +244,32 @@ class QwenMlxProvider:
             current_span = next_span
 
         return merged_tokens
+
+    def _quality_fallback_tokens(self, window_runs: List[WindowRun]) -> List[Token]:
+        merged_tokens: List[Token] = []
+
+        for window_run in window_runs:
+            preferred_tokens = self._preferred_tokens_for_window(window_run)
+            for token in preferred_tokens:
+                if merged_tokens and self._same_token(merged_tokens[-1], token):
+                    continue
+                merged_tokens.append(token)
+
+        return merged_tokens
+
+    def _preferred_tokens_for_window(self, window_run: WindowRun) -> List[Token]:
+        if window_run.core_tokens:
+            return list(window_run.core_tokens)
+        return list(window_run.tokens)
+
+    def _same_token(self, left: Token, right: Token) -> bool:
+        return (
+            left.text == right.text
+            and left.start_time == right.start_time
+            and left.end_time == right.end_time
+            and left.unit == right.unit
+            and left.language == right.language
+        )
 
     def _window_span(self, window: AlignmentWindow) -> WindowSpan:
         return WindowSpan(
