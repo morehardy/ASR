@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
@@ -14,6 +16,11 @@ from asr.media import FfmpegMediaPreparer
 from asr.output import build_output_path, default_output_root
 from asr.pipeline import process_media_file
 from asr.providers import create_default_provider
+
+_MLX_PREFLIGHT_CODE = (
+    "import mlx.core as mx\n"
+    "_ = mx.array([0], dtype=mx.int32)\n"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,11 +88,61 @@ def discover_cli_sources(inputs: Sequence[str], recursive: bool) -> List[Tuple[P
     return discovered
 
 
+def _first_non_empty_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def run_environment_preflight() -> Tuple[bool, str]:
+    ffmpeg_path = shutil.which("ffmpeg")
+    ffprobe_path = shutil.which("ffprobe")
+    missing: List[str] = []
+    if ffmpeg_path is None:
+        missing.append("ffmpeg")
+    if ffprobe_path is None:
+        missing.append("ffprobe")
+    if missing:
+        return (
+            False,
+            f"Missing required media dependency: {', '.join(missing)} not found on PATH.",
+        )
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _MLX_PREFLIGHT_CODE],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return False, f"Unable to run MLX/Metal preflight: {exc}"
+
+    if proc.returncode == 0:
+        return True, ""
+
+    detail = _first_non_empty_line(proc.stderr) or _first_non_empty_line(proc.stdout)
+    if proc.returncode < 0:
+        reason = f"process terminated by signal {-proc.returncode}"
+    else:
+        reason = f"exit code {proc.returncode}"
+    if detail:
+        return False, f"MLX/Metal preflight failed ({reason}): {detail}"
+    return False, f"MLX/Metal preflight failed ({reason})."
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     discovered_sources = discover_cli_sources(args.inputs, recursive=args.recursive)
     if not discovered_sources:
         print("No supported media files found.", file=sys.stderr)
+        return 1
+
+    ok, message = run_environment_preflight()
+    if not ok:
+        print(f"[asr] environment check failed: {message}", file=sys.stderr)
         return 1
 
     provider = create_default_provider()
