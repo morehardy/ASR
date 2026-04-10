@@ -61,6 +61,7 @@ class QwenMlxProvider:
             for window in windows
         ]
         self._evaluate_window_qualities(window_runs)
+        self._raise_if_all_windows_failed(window_runs)
 
         merged_tokens = self._merge_window_runs(window_runs)
         segments = self._tokens_to_segments(merged_tokens)
@@ -149,11 +150,11 @@ class QwenMlxProvider:
             )
 
     def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
-        successful_runs = [run for run in window_runs if run.error is None]
-
-        for index, window_run in enumerate(successful_runs):
+        for index, window_run in enumerate(window_runs):
+            if window_run.error is not None:
+                continue
             left_overlap_tokens, right_overlap_tokens = self._quality_boundary_inputs(
-                successful_runs,
+                window_runs,
                 index,
             )
             window_run.quality = evaluate_quality(
@@ -172,8 +173,8 @@ class QwenMlxProvider:
     ) -> tuple[List[Token], List[Token]]:
         comparisons: List[tuple[List[Token], List[Token]]] = []
         current = window_runs[index]
-        previous = self._find_neighbor_run(window_runs, index, step=-1)
-        following = self._find_neighbor_run(window_runs, index, step=1)
+        previous = self._adjacent_successful_neighbor(window_runs, index, step=-1)
+        following = self._adjacent_successful_neighbor(window_runs, index, step=1)
 
         if previous is not None:
             comparisons.append(
@@ -194,7 +195,7 @@ class QwenMlxProvider:
 
         return left_tokens, right_tokens
 
-    def _find_neighbor_run(
+    def _adjacent_successful_neighbor(
         self,
         window_runs: List[WindowRun],
         index: int,
@@ -202,12 +203,28 @@ class QwenMlxProvider:
         step: int,
     ) -> Optional[WindowRun]:
         cursor = index + step
-        while 0 <= cursor < len(window_runs):
-            candidate = window_runs[cursor]
-            if candidate.tokens:
-                return candidate
-            cursor += step
-        return None
+        if cursor < 0 or cursor >= len(window_runs):
+            return None
+
+        candidate = window_runs[cursor]
+        if candidate.error is not None or not candidate.tokens:
+            return None
+
+        expected_index = window_runs[index].window.index + step
+        if candidate.window.index != expected_index:
+            return None
+
+        return candidate
+
+    def _raise_if_all_windows_failed(self, window_runs: List[WindowRun]) -> None:
+        if any(window_run.error is None for window_run in window_runs):
+            return
+
+        error_details = ", ".join(
+            f"window {window_run.window.index}: {window_run.error or 'unknown error'}"
+            for window_run in window_runs
+        )
+        raise RuntimeError(f"All transcription windows failed: {error_details}")
 
     def _load_backend(self):
         try:

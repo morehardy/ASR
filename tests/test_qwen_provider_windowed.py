@@ -2,8 +2,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from asr.models import Token
 from asr.providers.quality import QualityResult, QualityThresholds
-from asr.providers.qwen_mlx import QwenMlxProvider
+from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
+from asr.providers.windowing import AlignmentWindow
 
 
 class FakeChunk:
@@ -180,6 +182,68 @@ class QwenProviderWindowedTest(unittest.TestCase):
             ["hello world", "again now", "tail done"],
         )
         self.assertEqual(doc.source_media["provider_metadata"]["quality_pass_count"], 2)
+
+    def test_failed_gap_does_not_create_non_adjacent_quality_boundary_comparison(self) -> None:
+        provider = QwenMlxProvider()
+        left_boundary = [Token("left-edge", 10.0, 10.1, unit="word")]
+        right_boundary = [Token("right-edge", 20.0, 20.1, unit="word")]
+        window_runs = [
+            WindowRun(
+                window=AlignmentWindow(0, 0.0, 10.0, 0.0, 12.0),
+                text="hello world",
+                tokens=[Token("hello", 1.0, 1.2, unit="word")],
+                right_overlap_tokens=left_boundary,
+                core_text="hello world",
+            ),
+            WindowRun(
+                window=AlignmentWindow(1, 10.0, 20.0, 8.0, 22.0),
+                error="middle failed",
+            ),
+            WindowRun(
+                window=AlignmentWindow(2, 20.0, 30.0, 18.0, 30.0),
+                text="tail done",
+                tokens=[Token("tail", 21.0, 21.2, unit="word")],
+                left_overlap_tokens=right_boundary,
+                core_text="tail done",
+            ),
+        ]
+
+        captured_calls: list[tuple[list[object], list[object]]] = []
+
+        def capture_quality(**kwargs: object) -> QualityResult:
+            captured_calls.append(
+                (
+                    list(kwargs["left_overlap_tokens"]),
+                    list(kwargs["right_overlap_tokens"]),
+                )
+            )
+            return QualityResult(True, 1.0, 0.0, 0.0, 0.0)
+
+        with patch(
+            "asr.providers.qwen_mlx.evaluate_quality",
+            side_effect=capture_quality,
+        ):
+            provider._evaluate_window_qualities(window_runs)
+
+        self.assertEqual(len(captured_calls), 2)
+        self.assertEqual(captured_calls[0], ([], []))
+        self.assertEqual(captured_calls[1], ([], []))
+
+    def test_all_windows_fail_raises_explicit_error(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                RuntimeError("first failed"),
+                RuntimeError("second failed"),
+                RuntimeError("third failed"),
+            ],
+            align_responses=[],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "All transcription windows failed"):
+            provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual(len(asr_model.calls), 3)
+        self.assertEqual(len(align_model.calls), 0)
 
 
 if __name__ == "__main__":
