@@ -34,4 +34,5 @@ def probe_duration_sec(path: Path) -> float:
 def parse_silence_anchors(stderr_text: str) -> List[float]:
     starts = [float(match.group(1)) for match in _SILENCE_START.finditer(stderr_text)]
     ends = [float(match.group(1)) for match in _SILENCE_END.finditer(stderr_text)]
+    # Intentionally truncate to the number of complete silence intervals we saw.
     return [(start + end) / 2.0 for start, end in zip(starts, ends)]
