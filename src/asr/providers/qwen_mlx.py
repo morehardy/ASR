@@ -451,10 +451,21 @@ class QwenMlxProvider:
             if merged and self._same_token(merged[-1], token):
                 continue
             if enforce_monotonic and merged and token.start_time < merged[-1].start_time:
-                continue
+                token = self._coerce_monotonic_token(merged[-1], token)
             merged.append(token)
 
         return merged
+
+    def _coerce_monotonic_token(self, previous: Token, token: Token) -> Token:
+        start_time = previous.start_time
+        end_time = max(token.end_time, start_time)
+        return Token(
+            text=token.text,
+            start_time=start_time,
+            end_time=end_time,
+            unit=token.unit,
+            language=token.language,
+        )
 
     def _build_document(
         self,

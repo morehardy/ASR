@@ -267,7 +267,7 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(asr_model.calls, [])
         self.assertEqual(align_model.calls, [])
 
-    def test_fallback_merge_skips_non_monotonic_full_window_tokens(self) -> None:
+    def test_fallback_merge_preserves_text_when_coercing_non_monotonic_tokens(self) -> None:
         provider = QwenMlxProvider()
         window_runs = [
             WindowRun(
@@ -292,9 +292,18 @@ class QwenProviderWindowedTest(unittest.TestCase):
 
         self.assertEqual(
             [token.start_time for token in merged_tokens],
-            [10.0, 12.0],
+            [10.0, 10.0, 10.0, 12.0],
         )
-        self.assertEqual([token.text for token in merged_tokens], ["alpha", "beta"])
+        self.assertEqual(
+            [token.text for token in merged_tokens],
+            ["alpha", "overlap", "alpha", "beta"],
+        )
+        self.assertTrue(
+            all(
+                merged_tokens[idx].start_time >= merged_tokens[idx - 1].start_time
+                for idx in range(1, len(merged_tokens))
+            )
+        )
 
     def test_resolve_silence_anchor_uses_parsed_anchor_within_bounds(self) -> None:
         provider = QwenMlxProvider()
