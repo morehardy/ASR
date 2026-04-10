@@ -42,6 +42,11 @@ class TranscriptionDocument:
     source_media: Optional[Dict[str, Any]] = None
     detected_language: Optional[str] = None
 
+    def ensure_source_media(self) -> Dict[str, Any]:
+        if self.source_media is None:
+            self.source_media = {}
+        return self.source_media
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "source_path": self.source_path,

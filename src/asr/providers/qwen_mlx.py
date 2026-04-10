@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
 from asr.models import Segment, Token, TranscriptionDocument
+from asr.providers.authority import (
+    build_transcript_tokens,
+    project_timing_onto_transcript,
+)
+from asr.providers.media_probe import probe_duration_sec
+from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
+from asr.providers.window_merge import WindowSpan, merge_adjacent_windows
+from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
 
 
 DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
 DEFAULT_ALIGNER_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
+
+
+@dataclass(slots=True)
+class WindowRun:
+    window: AlignmentWindow
+    text: str
+    language: Optional[str]
+    tokens: List[Token]
+    quality: QualityResult
 
 
 @dataclass
@@ -20,6 +37,8 @@ class QwenMlxProvider:
     asr_model_id: str = DEFAULT_ASR_MODEL
     aligner_model_id: str = DEFAULT_ALIGNER_MODEL
     name: str = "qwen-mlx"
+    window_config: WindowBudgetConfig = field(default_factory=WindowBudgetConfig)
+    quality_thresholds: QualityThresholds = field(default_factory=QualityThresholds)
 
     def __post_init__(self) -> None:
         self._asr_model: Optional[Any] = None
@@ -30,7 +49,46 @@ class QwenMlxProvider:
         self._asr_model = self._asr_model or load(self.asr_model_id)
         self._aligner_model = self._aligner_model or load(self.aligner_model_id)
 
-        transcription = self._asr_model.generate(str(audio_path))
+        total_duration_sec = self._probe_duration_sec(audio_path)
+        windows = self._plan_windows(total_duration_sec)
+        window_runs = [self._transcribe_window(audio_path, window) for window in windows]
+
+        merged_tokens = self._merge_window_runs(window_runs)
+        segments = self._tokens_to_segments(merged_tokens)
+        if not segments:
+            segments = self._fallback_segments_from_windows(window_runs)
+
+        detected_language = next(
+            (run.language for run in window_runs if run.language is not None),
+            None,
+        )
+        document = TranscriptionDocument(
+            source_path=str(audio_path),
+            provider_name=self.name,
+            detected_language=detected_language,
+            segments=segments,
+        )
+        document.ensure_source_media()["provider_metadata"] = {
+            "processing_strategy": "windowed_bounded_alignment",
+            "window_count": len(windows),
+            "duration_sec": total_duration_sec,
+            "quality_pass_count": sum(1 for run in window_runs if run.quality.passed),
+            "window_diagnostics": [
+                self._build_window_diagnostic(run) for run in window_runs
+            ],
+        }
+        return document
+
+    def _plan_windows(self, total_duration_sec: float) -> List[AlignmentWindow]:
+        planner = WindowPlanner(
+            self.window_config,
+            anchor_resolver=self._resolve_silence_anchor,
+        )
+        return planner.plan(total_duration_sec)
+
+    def _transcribe_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
+        context_input = self._build_context_input(audio_path, window)
+        transcription = self._asr_model.generate(context_input)
         text = getattr(transcription, "text", "").strip()
         language = self._normalize_language(getattr(transcription, "language", None))
 
@@ -38,27 +96,38 @@ class QwenMlxProvider:
         if language:
             align_kwargs["language"] = language
 
-        aligned_items = list(self._aligner_model.generate(str(audio_path), **align_kwargs))
-        tokens = [self._item_to_token(item, language=language) for item in aligned_items if getattr(item, "text", "").strip()]
-        segments = self._tokens_to_segments(tokens)
+        aligned_items = list(self._aligner_model.generate(context_input, **align_kwargs))
+        aligner_tokens = [
+            self._item_to_token(item, language=language)
+            for item in aligned_items
+            if getattr(item, "text", "").strip()
+        ]
+        transcript_tokens = self._build_authoritative_tokens(text, language)
+        projected_tokens = project_timing_onto_transcript(
+            transcript_tokens,
+            aligner_tokens,
+        )
+        global_tokens = self._offset_tokens(projected_tokens, window.context_start)
 
-        if not segments and text:
-            segments = [
-                Segment(
-                    id="seg-1",
-                    text=text,
-                    start_time=0.0,
-                    end_time=0.0,
-                    language=language,
-                    tokens=[],
-                )
-            ]
+        left_overlap_tokens, core_tokens, right_overlap_tokens = (
+            self._split_window_tokens(global_tokens, window)
+        )
+        core_text = self._join_tokens(core_tokens) if core_tokens else text
+        quality = evaluate_quality(
+            tokens=global_tokens,
+            left_overlap_tokens=left_overlap_tokens,
+            right_overlap_tokens=right_overlap_tokens,
+            core_text=core_text,
+            context_text=text,
+            thresholds=self.quality_thresholds,
+        )
 
-        return TranscriptionDocument(
-            source_path=str(audio_path),
-            provider_name=self.name,
-            detected_language=language,
-            segments=segments,
+        return WindowRun(
+            window=window,
+            text=text,
+            language=language,
+            tokens=global_tokens,
+            quality=quality,
         )
 
     def _load_backend(self):
@@ -70,6 +139,141 @@ class QwenMlxProvider:
                 "Install the optional dependency set with `uv sync --extra mlx`."
             ) from exc
         return load
+
+    def _probe_duration_sec(self, audio_path: Path) -> float:
+        return probe_duration_sec(audio_path)
+
+    def _resolve_silence_anchor(
+        self, target_split_sec: float, search_start_sec: float, search_end_sec: float
+    ) -> Optional[float]:
+        del target_split_sec, search_start_sec, search_end_sec
+        return None
+
+    def _build_context_input(self, audio_path: Path, window: AlignmentWindow) -> str:
+        del window
+        return str(audio_path)
+
+    def _build_authoritative_tokens(
+        self,
+        text: str,
+        language: Optional[str],
+    ) -> List[Token]:
+        transcript_tokens = build_transcript_tokens(text, language=language)
+        return [
+            Token(
+                text=token.text,
+                start_time=token.start_time,
+                end_time=token.end_time,
+                unit=self._infer_unit(text=token.text, language=language),
+                language=token.language,
+            )
+            for token in transcript_tokens
+        ]
+
+    def _offset_tokens(self, tokens: Iterable[Token], offset_sec: float) -> List[Token]:
+        return [
+            Token(
+                text=token.text,
+                start_time=token.start_time + offset_sec,
+                end_time=token.end_time + offset_sec,
+                unit=token.unit,
+                language=token.language,
+            )
+            for token in tokens
+        ]
+
+    def _split_window_tokens(
+        self,
+        tokens: Iterable[Token],
+        window: AlignmentWindow,
+    ) -> tuple[List[Token], List[Token], List[Token]]:
+        left_overlap: List[Token] = []
+        core_tokens: List[Token] = []
+        right_overlap: List[Token] = []
+
+        for token in tokens:
+            if token.start_time < window.core_start:
+                left_overlap.append(token)
+            elif token.start_time < window.core_end:
+                core_tokens.append(token)
+            else:
+                right_overlap.append(token)
+
+        return left_overlap, core_tokens, right_overlap
+
+    def _merge_window_runs(self, window_runs: List[WindowRun]) -> List[Token]:
+        merged_tokens: List[Token] = []
+        current_span: Optional[WindowSpan] = None
+
+        for window_run in window_runs:
+            if not window_run.tokens:
+                continue
+
+            next_span = self._window_span(window_run.window)
+            if not merged_tokens or current_span is None:
+                merged_tokens = list(window_run.tokens)
+                current_span = next_span
+                continue
+
+            merged_tokens = merge_adjacent_windows(
+                merged_tokens,
+                window_run.tokens,
+                current_span,
+                next_span,
+            )
+            current_span = next_span
+
+        return merged_tokens
+
+    def _window_span(self, window: AlignmentWindow) -> WindowSpan:
+        return WindowSpan(
+            core_start=window.core_start,
+            core_end=window.core_end,
+            context_start=window.context_start,
+            context_end=window.context_end,
+        )
+
+    def _build_window_diagnostic(self, window_run: WindowRun) -> dict[str, Any]:
+        return {
+            "index": window_run.window.index,
+            "core_start": window_run.window.core_start,
+            "core_end": window_run.window.core_end,
+            "context_start": window_run.window.context_start,
+            "context_end": window_run.window.context_end,
+            "token_count": len(window_run.tokens),
+            "quality": {
+                "passed": window_run.quality.passed,
+                "monotonic_timestamp_ratio": (
+                    window_run.quality.monotonic_timestamp_ratio
+                ),
+                "zero_or_flat_timestamp_ratio": (
+                    window_run.quality.zero_or_flat_timestamp_ratio
+                ),
+                "boundary_disagreement_score": (
+                    window_run.quality.boundary_disagreement_score
+                ),
+                "core_context_text_divergence": (
+                    window_run.quality.core_context_text_divergence
+                ),
+            },
+        }
+
+    def _fallback_segments_from_windows(self, window_runs: List[WindowRun]) -> List[Segment]:
+        segments: List[Segment] = []
+        for window_run in window_runs:
+            if not window_run.text:
+                continue
+            segments.append(
+                Segment(
+                    id=f"seg-{len(segments) + 1}",
+                    text=window_run.text,
+                    start_time=window_run.window.core_start,
+                    end_time=window_run.window.core_end,
+                    language=window_run.language,
+                    tokens=[],
+                )
+            )
+        return segments
 
     def _item_to_token(self, item: Any, language: Optional[str]) -> Token:
         text = str(getattr(item, "text", "")).strip()
