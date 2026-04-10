@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -38,14 +39,18 @@ class WindowPlanner:
     def __init__(
         self,
         config: WindowBudgetConfig,
-        anchor_resolver: AnchorResolver | None,
+        anchor_resolver: Optional[AnchorResolver],
     ) -> None:
         self._config = config
         self._anchor_resolver = anchor_resolver
 
     def plan(self, total_duration_sec: float) -> list[AlignmentWindow]:
-        if total_duration_sec <= 0.0:
+        if not math.isfinite(total_duration_sec):
+            raise ValueError("total_duration_sec must be finite")
+        if total_duration_sec == 0.0:
             return []
+        if total_duration_sec < 0.0:
+            raise ValueError("total_duration_sec must be positive")
 
         windows: list[AlignmentWindow] = []
         cursor = 0.0
@@ -108,7 +113,7 @@ class WindowPlanner:
             return candidate_end
 
         resolved = self._anchor_resolver(candidate_end, search_start, search_end)
-        if resolved is None:
+        if resolved is None or not math.isfinite(resolved):
             return candidate_end
 
         if resolved <= core_start:
