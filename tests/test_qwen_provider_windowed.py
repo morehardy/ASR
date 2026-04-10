@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -244,6 +245,83 @@ class QwenProviderWindowedTest(unittest.TestCase):
 
         self.assertEqual(len(asr_model.calls), 3)
         self.assertEqual(len(align_model.calls), 0)
+
+    def test_zero_duration_transcribe_returns_empty_document(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[],
+            align_responses=[],
+        )
+        provider._probe_duration_sec = lambda _: 0.0
+
+        doc = provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual(doc.segments, [])
+        self.assertIsNone(doc.detected_language)
+        metadata = doc.source_media["provider_metadata"]
+        self.assertEqual(metadata["processing_strategy"], "windowed_bounded_alignment")
+        self.assertEqual(metadata["window_count"], 0)
+        self.assertEqual(metadata["duration_sec"], 0.0)
+        self.assertEqual(metadata["quality_pass_count"], 0)
+        self.assertEqual(metadata["failed_window_count"], 0)
+        self.assertEqual(metadata["window_diagnostics"], [])
+        self.assertEqual(asr_model.calls, [])
+        self.assertEqual(align_model.calls, [])
+
+    def test_fallback_merge_skips_non_monotonic_full_window_tokens(self) -> None:
+        provider = QwenMlxProvider()
+        window_runs = [
+            WindowRun(
+                window=AlignmentWindow(0, 10.0, 11.0, 9.0, 12.0),
+                text="alpha",
+                tokens=[Token("alpha", 10.0, 10.2, unit="word")],
+                core_tokens=[Token("alpha", 10.0, 10.2, unit="word")],
+            ),
+            WindowRun(
+                window=AlignmentWindow(1, 11.0, 12.0, 9.0, 13.0),
+                text="overlap alpha beta",
+                tokens=[
+                    Token("overlap", 9.5, 9.8, unit="word"),
+                    Token("alpha", 10.0, 10.2, unit="word"),
+                    Token("beta", 12.0, 12.2, unit="word"),
+                ],
+                core_tokens=[],
+            ),
+        ]
+
+        merged_tokens = provider._merge_window_runs(window_runs)
+
+        self.assertEqual(
+            [token.start_time for token in merged_tokens],
+            [10.0, 12.0],
+        )
+        self.assertEqual([token.text for token in merged_tokens], ["alpha", "beta"])
+
+    def test_resolve_silence_anchor_uses_parsed_anchor_within_bounds(self) -> None:
+        provider = QwenMlxProvider()
+        provider._active_audio_path = Path("demo.wav")
+
+        stderr = """
+[silencedetect @ 0x0] silence_start: 143.0
+[silencedetect @ 0x0] silence_end: 145.0 | silence_duration: 2.0
+[silencedetect @ 0x0] silence_start: 148.0
+[silencedetect @ 0x0] silence_end: 149.0 | silence_duration: 1.0
+[silencedetect @ 0x0] silence_start: 170.0
+[silencedetect @ 0x0] silence_end: 171.0 | silence_duration: 1.0
+"""
+
+        with patch(
+            "asr.providers.qwen_mlx.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["ffmpeg"],
+                returncode=0,
+                stdout="",
+                stderr=stderr,
+            ),
+        ) as run_mock:
+            anchor = provider._resolve_silence_anchor(147.4, 140.0, 150.0)
+
+        self.assertEqual(anchor, 148.5)
+        self.assertEqual(run_mock.call_count, 1)
 
 
 if __name__ == "__main__":

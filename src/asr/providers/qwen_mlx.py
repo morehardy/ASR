@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
@@ -11,7 +12,7 @@ from asr.providers.authority import (
     build_transcript_tokens,
     project_timing_onto_transcript,
 )
-from asr.providers.media_probe import probe_duration_sec
+from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
 from asr.providers.window_merge import WindowSpan, merge_adjacent_windows
 from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
@@ -48,6 +49,8 @@ class QwenMlxProvider:
     def __post_init__(self) -> None:
         self._asr_model: Optional[Any] = None
         self._aligner_model: Optional[Any] = None
+        self._active_audio_path: Optional[Path] = None
+        self._silence_anchor_cache: dict[str, List[float]] = {}
 
     def transcribe(self, audio_path: Path) -> TranscriptionDocument:
         load = self._load_backend()
@@ -55,7 +58,21 @@ class QwenMlxProvider:
         self._aligner_model = self._aligner_model or load(self.aligner_model_id)
 
         total_duration_sec = self._probe_duration_sec(audio_path)
-        windows = self._plan_windows(total_duration_sec)
+        self._active_audio_path = audio_path
+        try:
+            windows = self._plan_windows(total_duration_sec)
+        finally:
+            self._active_audio_path = None
+
+        if not windows:
+            return self._build_document(
+                audio_path=audio_path,
+                total_duration_sec=total_duration_sec,
+                windows=windows,
+                window_runs=[],
+                segments=[],
+            )
+
         window_runs = [
             self._execute_window(audio_path, window)
             for window in windows
@@ -68,29 +85,13 @@ class QwenMlxProvider:
         if not segments:
             segments = self._fallback_segments_from_windows(window_runs)
 
-        detected_language = next(
-            (run.language for run in window_runs if run.language is not None),
-            None,
-        )
-        document = TranscriptionDocument(
-            source_path=str(audio_path),
-            provider_name=self.name,
-            detected_language=detected_language,
+        return self._build_document(
+            audio_path=audio_path,
+            total_duration_sec=total_duration_sec,
+            windows=windows,
+            window_runs=window_runs,
             segments=segments,
         )
-        document.ensure_source_media()["provider_metadata"] = {
-            "processing_strategy": "windowed_bounded_alignment",
-            "window_count": len(windows),
-            "duration_sec": total_duration_sec,
-            "quality_pass_count": sum(
-                1 for run in window_runs if run.quality is not None and run.quality.passed
-            ),
-            "failed_window_count": sum(1 for run in window_runs if run.error is not None),
-            "window_diagnostics": [
-                self._build_window_diagnostic(run) for run in window_runs
-            ],
-        }
-        return document
 
     def _plan_windows(self, total_duration_sec: float) -> List[AlignmentWindow]:
         planner = WindowPlanner(
@@ -242,8 +243,53 @@ class QwenMlxProvider:
     def _resolve_silence_anchor(
         self, target_split_sec: float, search_start_sec: float, search_end_sec: float
     ) -> Optional[float]:
-        del target_split_sec, search_start_sec, search_end_sec
-        return None
+        if self._active_audio_path is None:
+            return None
+
+        anchors = self._silence_anchors_for_audio(self._active_audio_path)
+        bounded_anchors = [
+            anchor
+            for anchor in anchors
+            if search_start_sec <= anchor <= search_end_sec
+        ]
+        if not bounded_anchors:
+            return None
+
+        return min(
+            bounded_anchors,
+            key=lambda anchor: (abs(anchor - target_split_sec), anchor),
+        )
+
+    def _silence_anchors_for_audio(self, audio_path: Path) -> List[float]:
+        cache_key = str(audio_path)
+        cached = self._silence_anchor_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-nostats",
+                    "-i",
+                    str(audio_path),
+                    "-af",
+                    "silencedetect=n=-35dB:d=0.3",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            anchors = parse_silence_anchors(result.stderr or "")
+        except (OSError, ValueError):
+            anchors = []
+
+        self._silence_anchor_cache[cache_key] = anchors
+        return anchors
 
     def _context_input_path(self, audio_path: Path, window: AlignmentWindow) -> str:
         return (
@@ -313,6 +359,7 @@ class QwenMlxProvider:
                 merged_tokens = self._append_tokens(
                     merged_tokens,
                     self._merge_passing_block(passing_block),
+                    enforce_monotonic=True,
                 )
                 passing_block = []
                 continue
@@ -324,16 +371,19 @@ class QwenMlxProvider:
             merged_tokens = self._append_tokens(
                 merged_tokens,
                 self._merge_passing_block(passing_block),
+                enforce_monotonic=True,
             )
             passing_block = []
             merged_tokens = self._append_tokens(
                 merged_tokens,
                 self._fallback_tokens_for_run(window_run),
+                enforce_monotonic=True,
             )
 
         return self._append_tokens(
             merged_tokens,
             self._merge_passing_block(passing_block),
+            enforce_monotonic=True,
         )
 
     def _merge_passing_block(self, window_runs: List[WindowRun]) -> List[Token]:
@@ -364,6 +414,7 @@ class QwenMlxProvider:
             fallback_tokens = self._append_tokens(
                 fallback_tokens,
                 self._fallback_tokens_for_run(window_run),
+                enforce_monotonic=True,
             )
         return fallback_tokens
 
@@ -385,7 +436,13 @@ class QwenMlxProvider:
     def _fallback_tokens_for_run(self, window_run: WindowRun) -> List[Token]:
         return self._preferred_tokens_for_window(window_run)
 
-    def _append_tokens(self, existing: List[Token], new_tokens: List[Token]) -> List[Token]:
+    def _append_tokens(
+        self,
+        existing: List[Token],
+        new_tokens: List[Token],
+        *,
+        enforce_monotonic: bool = False,
+    ) -> List[Token]:
         if not new_tokens:
             return existing
 
@@ -393,9 +450,44 @@ class QwenMlxProvider:
         for token in new_tokens:
             if merged and self._same_token(merged[-1], token):
                 continue
+            if enforce_monotonic and merged and token.start_time < merged[-1].start_time:
+                continue
             merged.append(token)
 
         return merged
+
+    def _build_document(
+        self,
+        *,
+        audio_path: Path,
+        total_duration_sec: float,
+        windows: List[AlignmentWindow],
+        window_runs: List[WindowRun],
+        segments: List[Segment],
+    ) -> TranscriptionDocument:
+        detected_language = next(
+            (run.language for run in window_runs if run.language is not None),
+            None,
+        )
+        document = TranscriptionDocument(
+            source_path=str(audio_path),
+            provider_name=self.name,
+            detected_language=detected_language,
+            segments=segments,
+        )
+        document.ensure_source_media()["provider_metadata"] = {
+            "processing_strategy": "windowed_bounded_alignment",
+            "window_count": len(windows),
+            "duration_sec": total_duration_sec,
+            "quality_pass_count": sum(
+                1 for run in window_runs if run.quality is not None and run.quality.passed
+            ),
+            "failed_window_count": sum(1 for run in window_runs if run.error is not None),
+            "window_diagnostics": [
+                self._build_window_diagnostic(run) for run in window_runs
+            ],
+        }
+        return document
 
     def _preferred_tokens_for_window(self, window_run: WindowRun) -> List[Token]:
         if window_run.core_tokens:
