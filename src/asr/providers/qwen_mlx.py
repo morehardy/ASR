@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 import subprocess
 import tempfile
@@ -49,8 +50,11 @@ class QwenMlxProvider:
     name: str = "qwen-mlx"
     window_config: WindowBudgetConfig = field(default_factory=WindowBudgetConfig)
     quality_thresholds: QualityThresholds = field(default_factory=QualityThresholds)
+    window_parallelism: int = 2
 
     def __post_init__(self) -> None:
+        if self.window_parallelism < 1:
+            raise ValueError("window_parallelism must be >= 1")
         self._asr_model: Optional[Any] = None
         self._aligner_model: Optional[Any] = None
         self._active_audio_path: Optional[Path] = None
@@ -110,16 +114,7 @@ class QwenMlxProvider:
                     segments=[],
                 )
 
-            window_runs: List[WindowRun] = []
-            for index, window in enumerate(windows, start=1):
-                window_runs.append(
-                    self._execute_window(
-                        audio_path,
-                        window,
-                        window_index=index,
-                        window_count=len(windows),
-                    )
-                )
+            window_runs = self._run_windows(audio_path, windows)
             self._evaluate_window_qualities(window_runs)
             self._raise_if_all_windows_failed(window_runs)
 
@@ -220,6 +215,57 @@ class QwenMlxProvider:
                 window=window,
                 error=str(exc),
             )
+
+    def _run_windows(
+        self,
+        audio_path: Path,
+        windows: List[AlignmentWindow],
+    ) -> List[WindowRun]:
+        if not windows:
+            return []
+
+        window_count = len(windows)
+        if self.window_parallelism == 1 or window_count == 1:
+            return [
+                self._execute_window(
+                    audio_path,
+                    window,
+                    window_index=index,
+                    window_count=window_count,
+                )
+                for index, window in enumerate(windows, start=1)
+            ]
+
+        max_workers = min(self.window_parallelism, window_count)
+        results_by_index: dict[int, WindowRun] = {}
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="asr-window",
+        ) as executor:
+            future_to_job = {
+                executor.submit(
+                    self._execute_window,
+                    audio_path,
+                    window,
+                    window_index=index,
+                    window_count=window_count,
+                ): (index, window)
+                for index, window in enumerate(windows, start=1)
+            }
+            for future in as_completed(future_to_job):
+                index, window = future_to_job[future]
+                try:
+                    results_by_index[index] = future.result()
+                except Exception as exc:
+                    results_by_index[index] = WindowRun(window=window, error=str(exc))
+
+        return [
+            results_by_index.get(
+                index,
+                WindowRun(window=window, error="window execution produced no result"),
+            )
+            for index, window in enumerate(windows, start=1)
+        ]
 
     def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
         for index, window_run in enumerate(window_runs):
