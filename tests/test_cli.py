@@ -2,9 +2,33 @@ import io
 import subprocess
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from asr.cli import build_parser, main, resolve_cli_inputs, run_environment_preflight
+from asr.cli import app, build_parser, main, resolve_cli_inputs, run_environment_preflight
+
+
+class CliTyperBootstrapTest(unittest.TestCase):
+    def test_app_symbol_is_available(self) -> None:
+        self.assertTrue(callable(app))
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    def test_main_exits_early_with_readable_error_when_preflight_fails(
+        self,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        mock_discover.return_value = [(Path("demo.mov"), Path.cwd())]
+        mock_preflight.return_value = (False, "MLX unavailable")
+
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            exit_code = main(["demo.mov"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("environment check failed", stderr.getvalue())
+        self.assertIn("MLX unavailable", stderr.getvalue())
 
 
 class CliParserTest(unittest.TestCase):
@@ -81,3 +105,71 @@ class CliEnvironmentPreflightTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("environment check failed", stderr.getvalue())
         self.assertIn("MLX unavailable", stderr.getvalue())
+
+
+class CliCompletionOutputTest(unittest.TestCase):
+    @patch("asr.cli.build_fish_completion_script")
+    def test_completion_fish_prints_script(self, mock_build_script) -> None:
+        mock_build_script.return_value = "complete -c asr -f\n"
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            exit_code = main(["completion", "fish"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), "complete -c asr -f\n")
+
+    @patch("asr.cli.build_fish_completion_script")
+    def test_completion_fish_returns_error_when_generation_fails(self, mock_build_script) -> None:
+        mock_build_script.side_effect = RuntimeError("generation failed")
+
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            exit_code = main(["completion", "fish"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("completion generation failed", stderr.getvalue())
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_completion_fish")
+    def test_completion_dispatch_uses_first_positional_token(self, mock_run_completion_fish, mock_discover) -> None:
+        mock_run_completion_fish.return_value = 0
+
+        exit_code = main(["--verbose", "completion", "fish"])
+
+        self.assertEqual(exit_code, 0)
+        mock_run_completion_fish.assert_called_once()
+        mock_discover.assert_not_called()
+
+
+class CliCompletionInstallTest(unittest.TestCase):
+    @patch("asr.cli.build_fish_completion_script")
+    def test_completion_install_fish_writes_expected_file(self, mock_build_script) -> None:
+        mock_build_script.return_value = "complete -c asr -f\n"
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            stdout = io.StringIO()
+            with patch("asr.cli.Path.home", return_value=home):
+                with patch("sys.stdout", stdout):
+                    exit_code = main(["completion", "install", "fish"])
+
+            target = home / ".config" / "fish" / "completions" / "asr.fish"
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(target.exists())
+            self.assertEqual(target.read_text(encoding="utf-8"), "complete -c asr -f\n")
+            self.assertIn(str(target), stdout.getvalue())
+
+    @patch("asr.cli.build_fish_completion_script")
+    def test_completion_install_fish_overwrites_existing_file(self, mock_build_script) -> None:
+        mock_build_script.return_value = "new-content\n"
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            target = home / ".config" / "fish" / "completions" / "asr.fish"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old-content\n", encoding="utf-8")
+
+            with patch("asr.cli.Path.home", return_value=home):
+                exit_code = main(["completion", "install", "fish"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new-content\n")

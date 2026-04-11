@@ -97,8 +97,27 @@ Arguments and flags:
 - `--output-dir`: override default output root
 - `--granularity {sentence,token}`:
   - `sentence`: subtitle entries come from segment boundaries
-  - `token`: subtitle/JSON `items` are generated from tokens
+- `token`: subtitle/JSON `items` are generated from tokens
 - `--verbose`: print per-file processing summary
+
+## Shell Completion (fish)
+
+Generate fish completion script:
+
+```bash
+asr completion fish
+```
+
+Install fish completion script:
+
+```bash
+asr completion install fish
+```
+
+Install target path:
+
+- `~/.config/fish/completions/asr.fish`
+- existing file is overwritten on install
 
 ## Supported Input Formats
 

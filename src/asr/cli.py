@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Literal, Sequence, Tuple
+
+import click
+import typer
 
 from asr.discovery import discover_media_files
 from asr.exporters import render_json, render_srt, render_vtt
@@ -22,8 +26,16 @@ _MLX_PREFLIGHT_CODE = (
     "_ = mx.array([0], dtype=mx.int32)\n"
 )
 
+app = typer.Typer(
+    name="asr",
+    help="Extract subtitles and aligned timestamps from local audio and video.",
+    add_completion=False,
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
+    """Backward-compatible parser builder retained for tests and integrations."""
+
     parser = argparse.ArgumentParser(
         prog="asr",
         description="Extract subtitles and aligned timestamps from local audio and video.",
@@ -133,9 +145,68 @@ def run_environment_preflight() -> Tuple[bool, str]:
     return False, f"MLX/Metal preflight failed ({reason})."
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    discovered_sources = discover_cli_sources(args.inputs, recursive=args.recursive)
+def build_fish_completion_script() -> str:
+    env = dict(os.environ)
+    env["_ASR_COMPLETE"] = "fish_source"
+    proc = subprocess.run(
+        [sys.executable, "-m", "asr"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    if proc.returncode != 0:
+        detail = _first_non_empty_line(proc.stderr) or _first_non_empty_line(proc.stdout)
+        raise RuntimeError(detail or f"completion process failed with exit code {proc.returncode}")
+    if not proc.stdout.strip():
+        raise RuntimeError("completion script output was empty")
+    return proc.stdout
+
+
+def run_completion_fish() -> int:
+    try:
+        script = build_fish_completion_script()
+    except RuntimeError as exc:
+        print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
+        return 1
+    print(script, end="")
+    return 0
+
+
+def fish_completion_target(home: Path | None = None) -> Path:
+    base = home if home is not None else Path.home()
+    return base / ".config" / "fish" / "completions" / "asr.fish"
+
+
+def install_fish_completion(script: str, home: Path | None = None) -> Path:
+    target = fish_completion_target(home=home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(script, encoding="utf-8")
+    return target
+
+
+def run_completion_install_fish() -> int:
+    try:
+        script = build_fish_completion_script()
+        target = install_fish_completion(script)
+    except RuntimeError as exc:
+        print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"[asr] completion install failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"[asr] fish completion installed at {target}")
+    return 0
+
+
+def _run_transcription(
+    inputs: Sequence[str],
+    recursive: bool,
+    output_dir: Path | None,
+    granularity: str,
+    verbose: bool,
+) -> int:
+    discovered_sources = discover_cli_sources(inputs, recursive=recursive)
     if not discovered_sources:
         print("No supported media files found.", file=sys.stderr)
         return 1
@@ -150,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     had_error = False
 
     for source_path, input_root in discovered_sources:
-        output_root = default_output_root(input_root, explicit_output_dir=args.output_dir)
+        output_root = default_output_root(input_root, explicit_output_dir=output_dir)
         try:
             document = process_media_file(
                 source_path=source_path,
@@ -158,9 +229,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 media_preparer=media_preparer,
             )
             rendered_outputs = {
-                ".srt": render_srt(document, granularity=args.granularity),
-                ".vtt": render_vtt(document, granularity=args.granularity),
-                ".json": render_json(document, granularity=args.granularity),
+                ".srt": render_srt(document, granularity=granularity),
+                ".vtt": render_vtt(document, granularity=granularity),
+                ".json": render_json(document, granularity=granularity),
             }
             for suffix, content in rendered_outputs.items():
                 target = build_output_path(
@@ -172,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
 
-            if args.verbose:
+            if verbose:
                 print(f"[asr] processed {source_path} -> {output_root}")
             else:
                 print(source_path)
@@ -181,3 +252,87 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[asr] failed for {source_path}: {exc}", file=sys.stderr)
 
     return 1 if had_error else 0
+
+
+@app.callback(invoke_without_command=True)
+def root(
+    ctx: typer.Context,
+    inputs: List[str] = typer.Argument(
+        None,
+        help="File, directory, or glob pattern. Defaults to the current directory.",
+    ),
+    recursive: bool = typer.Option(False, "--recursive", help="Recursively scan directory inputs."),
+    output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the default output directory root."),
+    granularity: Literal["sentence", "token"] = typer.Option(
+        "sentence",
+        "--granularity",
+        help="Subtitle and JSON view granularity.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", help="Print detailed progress information."),
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+
+    code = _run_transcription(
+        inputs=inputs or [],
+        recursive=recursive,
+        output_dir=output_dir,
+        granularity=granularity,
+        verbose=verbose,
+    )
+    raise typer.Exit(code=code)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(argv) if argv is not None else sys.argv[1:]
+    completion_exit_code = _dispatch_completion(args)
+    if completion_exit_code is not None:
+        return completion_exit_code
+    try:
+        result = app(args=args, prog_name="asr", standalone_mode=False)
+    except typer.Exit as exc:
+        return int(exc.exit_code)
+    except click.ClickException as exc:
+        exc.show(file=sys.stderr)
+        return int(exc.exit_code)
+    if isinstance(result, int):
+        return result
+    return 0
+
+
+def _dispatch_completion(args: Sequence[str]) -> int | None:
+    positional_index = _first_positional_index(args)
+    if positional_index is None:
+        return None
+
+    tail = list(args[positional_index:])
+    if not tail or tail[0] != "completion":
+        return None
+    if tail == ["completion", "fish"]:
+        return run_completion_fish()
+    if tail == ["completion", "install", "fish"]:
+        return run_completion_install_fish()
+    print("Usage: asr completion fish | asr completion install fish", file=sys.stderr)
+    return 2
+
+
+def _first_positional_index(args: Sequence[str]) -> int | None:
+    options_with_values = {"--output-dir", "--granularity"}
+
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            next_index = index + 1
+            return next_index if next_index < len(args) else None
+        if token.startswith("--"):
+            if any(token.startswith(f"{option}=") for option in options_with_values):
+                index += 1
+                continue
+            if token in options_with_values:
+                index += 2
+                continue
+            index += 1
+            continue
+        return index
+    return None
