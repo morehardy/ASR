@@ -31,10 +31,6 @@ app = typer.Typer(
     help="Extract subtitles and aligned timestamps from local audio and video.",
     add_completion=False,
 )
-completion_app = typer.Typer(help="Shell completion helpers.")
-app.add_typer(completion_app, name="completion")
-install_app = typer.Typer(help="Install shell completion scripts.")
-completion_app.add_typer(install_app, name="install")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -173,14 +169,14 @@ def build_fish_completion_script() -> str:
     return proc.stdout
 
 
-@completion_app.command("fish")
-def completion_fish() -> None:
+def run_completion_fish() -> int:
     try:
         script = build_fish_completion_script()
     except RuntimeError as exc:
         print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
-        raise typer.Exit(code=1)
+        return 1
     print(script, end="")
+    return 0
 
 
 def fish_completion_target(home: Path | None = None) -> Path:
@@ -195,18 +191,18 @@ def install_fish_completion(script: str, home: Path | None = None) -> Path:
     return target
 
 
-@install_app.command("fish")
-def completion_install_fish() -> None:
+def run_completion_install_fish() -> int:
     try:
         script = build_fish_completion_script()
         target = install_fish_completion(script)
     except RuntimeError as exc:
         print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
-        raise typer.Exit(code=1)
+        return 1
     except OSError as exc:
         print(f"[asr] completion install failed: {exc}", file=sys.stderr)
-        raise typer.Exit(code=1)
+        return 1
     print(f"[asr] fish completion installed at {target}")
+    return 0
 
 
 def _run_transcription(
@@ -264,12 +260,13 @@ def _run_transcription(
     return 1 if had_error else 0
 
 
-@app.callback(
-    invoke_without_command=True,
-    context_settings={"allow_extra_args": True, "allow_interspersed_args": True},
-)
+@app.callback(invoke_without_command=True)
 def root(
     ctx: typer.Context,
+    inputs: List[str] = typer.Argument(
+        None,
+        help="File, directory, or glob pattern. Defaults to the current directory.",
+    ),
     recursive: bool = typer.Option(False, "--recursive", help="Recursively scan directory inputs."),
     output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the default output directory root."),
     granularity: str = typer.Option(
@@ -284,7 +281,7 @@ def root(
         return
 
     code = _run_transcription(
-        inputs=ctx.args,
+        inputs=inputs or [],
         recursive=recursive,
         output_dir=output_dir,
         granularity=granularity,
@@ -295,6 +292,13 @@ def root(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
+    if args and args[0] == "completion":
+        if args == ["completion", "fish"]:
+            return run_completion_fish()
+        if args == ["completion", "install", "fish"]:
+            return run_completion_install_fish()
+        print("Usage: asr completion fish | asr completion install fish", file=sys.stderr)
+        return 2
     try:
         result = app(args=args, prog_name="asr", standalone_mode=False)
     except typer.Exit as exc:
