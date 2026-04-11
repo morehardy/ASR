@@ -130,6 +130,17 @@ class CliCompletionOutputTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("completion generation failed", stderr.getvalue())
 
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_completion_fish")
+    def test_completion_dispatch_uses_first_positional_token(self, mock_run_completion_fish, mock_discover) -> None:
+        mock_run_completion_fish.return_value = 0
+
+        exit_code = main(["--verbose", "completion", "fish"])
+
+        self.assertEqual(exit_code, 0)
+        mock_run_completion_fish.assert_called_once()
+        mock_discover.assert_not_called()
+
 
 class CliCompletionInstallTest(unittest.TestCase):
     @patch("asr.cli.build_fish_completion_script")

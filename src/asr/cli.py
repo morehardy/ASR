@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Literal, Sequence, Tuple
 
 import click
 import typer
@@ -145,12 +145,6 @@ def run_environment_preflight() -> Tuple[bool, str]:
     return False, f"MLX/Metal preflight failed ({reason})."
 
 
-def _validate_granularity(value: str) -> str:
-    if value not in ("sentence", "token"):
-        raise typer.BadParameter("Granularity must be one of: sentence, token.")
-    return value
-
-
 def build_fish_completion_script() -> str:
     env = dict(os.environ)
     env["_ASR_COMPLETE"] = "fish_source"
@@ -269,10 +263,9 @@ def root(
     ),
     recursive: bool = typer.Option(False, "--recursive", help="Recursively scan directory inputs."),
     output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the default output directory root."),
-    granularity: str = typer.Option(
+    granularity: Literal["sentence", "token"] = typer.Option(
         "sentence",
         "--granularity",
-        callback=_validate_granularity,
         help="Subtitle and JSON view granularity.",
     ),
     verbose: bool = typer.Option(False, "--verbose", help="Print detailed progress information."),
@@ -292,13 +285,9 @@ def root(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
-    if args and args[0] == "completion":
-        if args == ["completion", "fish"]:
-            return run_completion_fish()
-        if args == ["completion", "install", "fish"]:
-            return run_completion_install_fish()
-        print("Usage: asr completion fish | asr completion install fish", file=sys.stderr)
-        return 2
+    completion_exit_code = _dispatch_completion(args)
+    if completion_exit_code is not None:
+        return completion_exit_code
     try:
         result = app(args=args, prog_name="asr", standalone_mode=False)
     except typer.Exit as exc:
@@ -309,3 +298,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     if isinstance(result, int):
         return result
     return 0
+
+
+def _dispatch_completion(args: Sequence[str]) -> int | None:
+    positional_index = _first_positional_index(args)
+    if positional_index is None:
+        return None
+
+    tail = list(args[positional_index:])
+    if not tail or tail[0] != "completion":
+        return None
+    if tail == ["completion", "fish"]:
+        return run_completion_fish()
+    if tail == ["completion", "install", "fish"]:
+        return run_completion_install_fish()
+    print("Usage: asr completion fish | asr completion install fish", file=sys.stderr)
+    return 2
+
+
+def _first_positional_index(args: Sequence[str]) -> int | None:
+    options_with_values = {"--output-dir", "--granularity"}
+
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            next_index = index + 1
+            return next_index if next_index < len(args) else None
+        if token.startswith("--"):
+            if any(token.startswith(f"{option}=") for option in options_with_values):
+                index += 1
+                continue
+            if token in options_with_values:
+                index += 2
+                continue
+            index += 1
+            continue
+        return index
+    return None
