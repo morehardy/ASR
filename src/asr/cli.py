@@ -33,6 +33,8 @@ app = typer.Typer(
 )
 completion_app = typer.Typer(help="Shell completion helpers.")
 app.add_typer(completion_app, name="completion")
+install_app = typer.Typer(help="Install shell completion scripts.")
+completion_app.add_typer(install_app, name="install")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -179,6 +181,32 @@ def completion_fish() -> None:
         print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
         raise typer.Exit(code=1)
     print(script, end="")
+
+
+def fish_completion_target(home: Path | None = None) -> Path:
+    base = home if home is not None else Path.home()
+    return base / ".config" / "fish" / "completions" / "asr.fish"
+
+
+def install_fish_completion(script: str, home: Path | None = None) -> Path:
+    target = fish_completion_target(home=home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(script, encoding="utf-8")
+    return target
+
+
+@install_app.command("fish")
+def completion_install_fish() -> None:
+    try:
+        script = build_fish_completion_script()
+        target = install_fish_completion(script)
+    except RuntimeError as exc:
+        print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1)
+    except OSError as exc:
+        print(f"[asr] completion install failed: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1)
+    print(f"[asr] fish completion installed at {target}")
 
 
 def _run_transcription(
