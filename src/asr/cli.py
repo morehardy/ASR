@@ -153,7 +153,7 @@ def run_environment_preflight() -> Tuple[bool, str]:
 
 def build_fish_completion_script() -> str:
     env = dict(os.environ)
-    env["_ASR_COMPLETE"] = "fish_source"
+    env["_ASR_COMPLETE"] = "source_fish"
     proc = subprocess.run(
         [sys.executable, "-m", "asr"],
         capture_output=True,

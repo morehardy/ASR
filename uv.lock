@@ -27,6 +27,9 @@ wheels = [
 name = "asr"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "typer" },
+]
 
 [package.optional-dependencies]
 mlx = [
@@ -34,7 +37,10 @@ mlx = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mlx-audio", marker = "extra == 'mlx'", specifier = ">=0.3.1" }]
+requires-dist = [
+    { name = "mlx-audio", marker = "extra == 'mlx'", specifier = ">=0.3.1" },
+    { name = "typer", specifier = ">=0.16,<1.0" },
+]
 provides-extras = ["mlx"]
 
 [[package]]

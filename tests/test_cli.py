@@ -5,7 +5,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from asr.cli import app, build_parser, main, resolve_cli_inputs, run_environment_preflight
+from asr.cli import (
+    app,
+    build_fish_completion_script,
+    build_parser,
+    main,
+    resolve_cli_inputs,
+    run_environment_preflight,
+)
 from asr.models import TranscriptionDocument
 
 
@@ -109,6 +116,23 @@ class CliEnvironmentPreflightTest(unittest.TestCase):
 
 
 class CliCompletionOutputTest(unittest.TestCase):
+    @patch("asr.cli.subprocess.run")
+    def test_build_fish_completion_uses_source_fish_shell_instruction(
+        self, mock_run
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["python", "-m", "asr"],
+            returncode=0,
+            stdout="complete -c asr -f\n",
+            stderr="",
+        )
+
+        script = build_fish_completion_script()
+
+        self.assertEqual(script, "complete -c asr -f\n")
+        env = mock_run.call_args.kwargs["env"]
+        self.assertEqual(env["_ASR_COMPLETE"], "source_fish")
+
     @patch("asr.cli.build_fish_completion_script")
     def test_completion_fish_prints_script(self, mock_build_script) -> None:
         mock_build_script.return_value = "complete -c asr -f\n"
