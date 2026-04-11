@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from asr.models import Segment, Token
+from asr.observability.events import ObservabilityEvent
 from asr.providers.quality import QualityResult, QualityThresholds
 from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
 from asr.providers.windowing import AlignmentWindow
@@ -36,6 +37,17 @@ class FakeModel:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class _ProviderRecordingObserver:
+    def __init__(self) -> None:
+        self.events: list[ObservabilityEvent] = []
+
+    def on_event(self, event: ObservabilityEvent) -> None:
+        self.events.append(event)
+
+    def close(self) -> None:
+        return None
 
 
 class QwenProviderWindowedTest(unittest.TestCase):
@@ -370,6 +382,40 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertGreaterEqual(stabilized[0].end_time, 0.8)
         self.assertGreater(stabilized[2].end_time, 2.1)
         self.assertLessEqual(stabilized[2].end_time, 2.2)
+
+
+class QwenProviderObservabilityTest(unittest.TestCase):
+    def test_provider_emits_window_and_merge_steps(self) -> None:
+        provider = QwenMlxProvider()
+        provider._probe_duration_sec = lambda _: 140.0
+        provider._resolve_silence_anchor = lambda target, left, right: None
+
+        asr_model = FakeModel([FakeChunk("hello world", language="en")])
+        align_model = FakeModel(
+            [[FakeChunk("hello", start_time=0.0, end_time=0.4)]]
+        )
+        provider._load_backend = (
+            lambda: (lambda model_id: asr_model if "ASR" in model_id else align_model)
+        )
+
+        observer = _ProviderRecordingObserver()
+        provider.bind_observer(
+            observer=observer,
+            run_id="run-1",
+            file_id="file-1",
+            source_path="demo.wav",
+        )
+
+        provider.transcribe(Path("demo.wav"))
+
+        step_events = [
+            (event.event_type, event.step)
+            for event in observer.events
+            if event.event_type.startswith("step_")
+        ]
+        self.assertIn(("step_start", "provider_plan_windows"), step_events)
+        self.assertIn(("step_end", "provider_merge"), step_events)
+        self.assertTrue(any(step == "provider_window" for _, step in step_events))
 
 
 if __name__ == "__main__":

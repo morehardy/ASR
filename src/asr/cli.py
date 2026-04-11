@@ -258,14 +258,25 @@ def _run_transcription(
             )
             output_root = default_output_root(input_root, explicit_output_dir=output_dir)
             try:
-                document = process_media_file(
-                    source_path=source_path,
-                    provider=provider,
-                    media_preparer=media_preparer,
-                    observer=observer,
-                    run_id=run_id,
-                    file_id=file_id,
-                )
+                if hasattr(provider, "bind_observer"):
+                    provider.bind_observer(
+                        observer=observer,
+                        run_id=run_id,
+                        file_id=file_id,
+                        source_path=str(source_path),
+                    )
+                try:
+                    document = process_media_file(
+                        source_path=source_path,
+                        provider=provider,
+                        media_preparer=media_preparer,
+                        observer=observer,
+                        run_id=run_id,
+                        file_id=file_id,
+                    )
+                finally:
+                    if hasattr(provider, "clear_observer"):
+                        provider.clear_observer()
                 with observe_step(
                     observer,
                     run_id=run_id,
