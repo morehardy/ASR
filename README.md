@@ -1,102 +1,106 @@
 # asr
 
-`asr` is a planned local CLI tool for extracting transcripts, subtitles, and aligned timestamps from audio and video.
+`asr` is a local CLI for extracting subtitles and aligned timestamps from audio/video files.
 
-The current design targets a provider-based architecture so the backend can be replaced later without changing the overall user experience or exported semantics.
+It currently targets `macOS + Apple Silicon` and uses an MLX-based provider (`Qwen3-ASR + Qwen3-ForcedAligner`) behind a stable CLI interface.
 
 ## Current Status
 
-This repository is currently in the planning stage. The content below records the intended installation flow, command naming, input/output behavior, and example usage.
+The project is implemented and runnable.
 
-## Planned Features
+Current capabilities:
 
-- local CLI workflow
-- audio and video input support
-- automatic language detection
-- multilingual processing with especially strong Chinese and English expectations
-- subtitle export
-- aligned timestamps
-- provider abstraction for future backend replacement or expansion
+- local file and directory processing
+- audio/video normalization to mono 16 kHz WAV
+- sentence-level and token-level export views
+- subtitle export to `srt` and `vtt`
+- rich JSON export (segments, tokens, provider metadata)
+- windowed transcription/alignment pipeline with diagnostics
 
-## Planned Environment
+## Environment Requirements
 
-- Platform target: `macOS + Apple Silicon`
-- Python target: latest stable Python version available at implementation time
-- Environment management: `uv`
-- System dependencies: `ffmpeg`, `ffprobe`
+- OS: `macOS` on `Apple Silicon`
+- Python: `>=3.14,<3.15`
+- environment/tooling: `uv`
+- system dependencies on `PATH`:
+  - `ffmpeg`
+  - `ffprobe`
+- network access on first run (model download from Hugging Face)
 
-## Planned Provider
-
-The initial planned provider uses:
+Default provider models:
 
 - [`mlx-community/Qwen3-ASR-1.7B-bf16`](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16)
 - [`mlx-community/Qwen3-ForcedAligner-0.6B-bf16`](https://huggingface.co/mlx-community/Qwen3-ForcedAligner-0.6B-bf16)
 
-Planned model behavior:
+## Installation
 
-- models are downloaded and cached automatically on first run
-- the aligner is treated as part of the provider internals
-- users do not separately choose ASR and aligner models from the CLI
-
-## Planned Installation
-
-The exact commands may change after the repository is scaffolded, but the intended setup is:
-
-1. Install the latest stable Python version supported by `uv`.
-2. Install `uv`.
-3. Install `ffmpeg` and `ffprobe`.
-4. Create or sync the project environment with `uv`.
-5. Run the `asr` CLI against local media files.
-
-Representative shape only:
+1. Install `uv` (see [uv docs](https://docs.astral.sh/uv/)).
+2. Install `ffmpeg` and `ffprobe` with your package manager.
+3. Sync dependencies in project root.
 
 ```bash
-uv sync
-asr ./demo.mp4
+uv sync --extra mlx
 ```
 
-## Planned CLI Usage
-
-Public command name:
+4. Verify CLI is available.
 
 ```bash
-asr
+uv run --python 3.14 asr --help
 ```
 
-Planned usage examples:
+## Quick Start
+
+### Single file
 
 ```bash
-# No input path: use the current working directory
-asr
-
-# Single file
-asr ./demo.mp4
-
-# Directory input, non-recursive by default
-asr ./media
-
-# Recursive directory scan
-asr ./media --recursive
-
-# Custom output directory
-asr ./media --output-dir /tmp/asr-outputs
-
-# Prefer sentence-like output
-asr ./media --granularity sentence
-
-# Request token-level output and verbose logs
-asr ./media --granularity token --verbose
+uv run --python 3.14 --extra mlx asr ./demo.mp4 --verbose
 ```
 
-Planned CLI behavior:
+### No input path (defaults to current directory)
 
-- if no path is provided, use the current working directory
-- directory scanning is non-recursive by default
-- recursion is opt-in
-- outputs are overwritten by default
-- provider choice is not exposed in phase 1
+```bash
+uv run --python 3.14 --extra mlx asr
+```
 
-## Planned Supported Input Formats
+### Directory (non-recursive by default)
+
+```bash
+uv run --python 3.14 --extra mlx asr ./media
+```
+
+### Directory (recursive)
+
+```bash
+uv run --python 3.14 --extra mlx asr ./media --recursive --verbose
+```
+
+### Glob pattern input
+
+```bash
+uv run --python 3.14 --extra mlx asr "./media/**/*.mp4" --recursive --verbose
+```
+
+## CLI Reference
+
+Help output:
+
+```text
+usage: asr [-h] [--recursive] [--output-dir OUTPUT_DIR]
+           [--granularity {sentence,token}] [--verbose]
+           [inputs ...]
+```
+
+Arguments and flags:
+
+- `inputs`: file, directory, or glob pattern; defaults to current directory if omitted
+- `--recursive`: recurse when scanning directory inputs
+- `--output-dir`: override default output root
+- `--granularity {sentence,token}`:
+  - `sentence`: subtitle entries come from segment boundaries
+  - `token`: subtitle/JSON `items` are generated from tokens
+- `--verbose`: print per-file processing summary
+
+## Supported Input Formats
 
 Audio:
 
@@ -114,52 +118,26 @@ Video:
 - `mkv`
 - `webm`
 
-## Planned Output Formats
+## Output Files and Layout
 
-The default planned outputs are:
+For each input media file, the CLI writes:
 
-- `srt`
-- `vtt`
-- `json`
+- `<name>.srt`
+- `<name>.vtt`
+- `<name>.json`
 
-Planned semantics:
+Default output directory name: `outputs`
 
-- `srt` and `vtt` are for subtitle consumption
-- `json` keeps the richer alignment data for downstream processing
+Layout rules:
 
-Internal timing target:
+- input is a directory/current directory:
+  - output root defaults to `<input_root>/outputs`
+- input is a single file:
+  - output root defaults to `<file_parent>/outputs`
+- recursive batch keeps relative directory structure
+- `--output-dir` overrides output root
 
-- English word-level timing
-- Chinese character-level timing
-
-Planned public granularity options:
-
-- `sentence`
-- `token`
-
-`token` means:
-
-- English: word
-- Chinese: character
-
-## Planned Output Layout
-
-Default output directory name:
-
-```text
-outputs
-```
-
-Single-file example:
-
-```text
-/project/demo.mp4
-/project/outputs/demo.srt
-/project/outputs/demo.vtt
-/project/outputs/demo.json
-```
-
-Directory example with recursive processing:
+Example:
 
 ```text
 /project/media/
@@ -175,16 +153,140 @@ Directory example with recursive processing:
   nested/b.json
 ```
 
-Rules:
+## JSON Contract (Practical)
 
-- for directory or current-directory input, the default output root is `outputs/` under the input root
-- for single-file input, the default output root is `outputs/` under the file's parent directory
-- batch output preserves relative subdirectory structure
-- `--output-dir` overrides the default location
+`json` output includes:
 
-## Notes
+- top-level transcription document:
+  - `source_path`
+  - `provider_name`
+  - `detected_language`
+  - `segments`
+  - `source_media`
+- export view:
+  - `granularity`
+  - `items`
 
-- Phase 1 is transcription and alignment only.
-- Translation is out of scope for now.
-- Speaker diarization is only a reserved future extension and depends on provider capability.
-- Subtitle segmentation quality depends partly on model capability.
+`source_media` currently includes:
+
+- `prepared_audio_path`
+- `provider_metadata`:
+  - `processing_strategy`
+  - `window_count`
+  - `duration_sec`
+  - `quality_pass_count`
+  - `failed_window_count`
+  - `window_diagnostics`
+
+## Real E2E Example (Current Repo)
+
+Command used in this repository:
+
+```bash
+uv run --python 3.14 --extra mlx asr tests/e2e/test1.mov --verbose
+```
+
+Observed output files:
+
+- `tests/e2e/outputs/test1.srt`
+- `tests/e2e/outputs/test1.vtt`
+- `tests/e2e/outputs/test1.json`
+
+Observed sample stats from `test1.json`:
+
+- `window_count`: `3`
+- `failed_window_count`: `0`
+- `segments`: ~`49` (depends on current alignment behavior/model output)
+
+Sample subtitle excerpt:
+
+```text
+00:00:09,600 --> 00:00:17,640
+But despite all the buzz and hype, one of the things that's still underestimated by many people is their power as a developer too.
+```
+
+## Common Commands
+
+### Run unit tests
+
+```bash
+PYTHONPATH=src uv run --python 3.14 python -m unittest discover -s tests -p 'test_*.py'
+```
+
+### Run a single focused test
+
+```bash
+PYTHONPATH=src uv run --python 3.14 python -m unittest tests.test_authority
+```
+
+### Dry-check CLI parsing/help
+
+```bash
+uv run --python 3.14 asr --help
+```
+
+### Token-level subtitle export
+
+```bash
+uv run --python 3.14 --extra mlx asr ./demo.mp4 --granularity token --verbose
+```
+
+## Runtime Flow (What Happens Internally)
+
+For each media file:
+
+1. CLI discovers supported inputs (file/dir/glob).
+2. Environment preflight validates:
+   - `ffmpeg` and `ffprobe` availability
+   - MLX/Metal basic runtime check
+3. Media is normalized to mono 16 kHz WAV.
+4. Provider runs windowed ASR + alignment.
+5. Results are exported to `srt`, `vtt`, and `json`.
+
+## Exit Codes and Runtime Behavior
+
+- `0`: all discovered files processed successfully
+- `1`: no supported input found, preflight failed, or at least one file failed in batch
+
+Batch behavior:
+
+- files are processed one-by-one
+- failures are reported per file to stderr
+- other files continue processing
+
+## Troubleshooting
+
+### `[asr] environment check failed: Missing required media dependency...`
+
+Cause: `ffmpeg` and/or `ffprobe` not found on `PATH`.
+
+Fix:
+
+- install both binaries
+- ensure they are visible in the shell used to run `asr`
+
+### `[asr] environment check failed: MLX/Metal preflight failed...`
+
+Cause: MLX runtime could not initialize Metal backend (or crashed during preflight).
+
+Fix:
+
+- verify Apple Silicon + supported macOS runtime
+- re-check Python/venv and `mlx` dependency installation
+- retry from a clean shell/session
+
+### First run is slow
+
+Cause: model download and cache warm-up.
+
+Fix:
+
+- expected on first run
+- later runs should be faster after cache is populated
+
+## Notes and Scope
+
+- translation is out of scope in current phase
+- speaker diarization is not implemented
+- subtitle segmentation quality depends on model + alignment behavior
+- provider abstraction is in place for future backend extension
