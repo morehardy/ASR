@@ -1,8 +1,12 @@
 import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from asr.observability.console import ConsoleProgressObserver
 from asr.observability.events import ObservabilityEvent
+from asr.observability.metrics import MetricsCollectorObserver
 from asr.observability.observer import ObserverMux
 from asr.observability.timing import observe_step
 
@@ -126,6 +130,60 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("[1/2]", output)
         self.assertIn("prepare", output)
+
+
+class MetricsCollectorObserverTest(unittest.TestCase):
+    def test_writes_metrics_json_with_step_durations(self) -> None:
+        collector = MetricsCollectorObserver()
+        collector.on_event(ObservabilityEvent(event_type="run_start", run_id="run-1"))
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="prepare",
+                perf_counter=10.0,
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_end",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="prepare",
+                perf_counter=10.2,
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="file_end",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"status": "ok"},
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / "demo.metrics.json"
+            collector.write_file_metrics(file_id="1", target_path=target)
+            payload = json.loads(target.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["file"]["status"], "ok")
+        self.assertEqual(payload["steps"][0]["name"], "prepare")
+        self.assertAlmostEqual(payload["steps"][0]["duration_ms"], 200.0, delta=0.001)
 
 
 if __name__ == "__main__":

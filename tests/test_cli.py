@@ -204,3 +204,31 @@ class CliObservabilityIntegrationTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(mock_console_observer.called)
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_writes_metrics_json_only_in_verbose_mode(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "out"
+
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                segments=[],
+            )
+
+            exit_code = main(["--verbose", "--output-dir", str(output_root), str(source)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_root / "demo.json").exists())
+            self.assertTrue((output_root / "demo.metrics.json").exists())

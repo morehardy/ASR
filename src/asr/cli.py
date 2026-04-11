@@ -20,6 +20,7 @@ from asr.exporters import render_json, render_srt, render_vtt
 from asr.media import FfmpegMediaPreparer
 from asr.observability.console import ConsoleProgressObserver
 from asr.observability.events import ObservabilityEvent
+from asr.observability.metrics import MetricsCollectorObserver
 from asr.observability.observer import ObserverMux
 from asr.observability.timing import observe_step
 from asr.output import build_output_path, default_output_root
@@ -212,8 +213,12 @@ def _run_transcription(
     verbose: bool,
 ) -> int:
     run_id = f"run-{uuid.uuid4().hex[:8]}"
+    collector = MetricsCollectorObserver() if verbose else None
+    observers = [ConsoleProgressObserver()]
+    if collector is not None:
+        observers.append(collector)
     observer = ObserverMux(
-        observers=[ConsoleProgressObserver()],
+        observers=observers,
         warning_sink=lambda message: print(message, file=sys.stderr),
     )
     observer.on_event(ObservabilityEvent(event_type="run_start", run_id=run_id))
@@ -317,6 +322,14 @@ def _run_transcription(
                         meta={"status": "ok"},
                     )
                 )
+                if collector is not None:
+                    _write_metrics_json(
+                        collector=collector,
+                        file_id=file_id,
+                        source_path=source_path,
+                        input_root=input_root,
+                        output_root=output_root,
+                    )
                 if verbose:
                     print(f"[asr] processed {source_path} -> {output_root}")
                 else:
@@ -332,12 +345,44 @@ def _run_transcription(
                         meta={"status": "failed", "error": str(exc)},
                     )
                 )
+                if collector is not None:
+                    _write_metrics_json(
+                        collector=collector,
+                        file_id=file_id,
+                        source_path=source_path,
+                        input_root=input_root,
+                        output_root=output_root,
+                    )
                 print(f"[asr] failed for {source_path}: {exc}", file=sys.stderr)
 
         return 1 if had_error else 0
     finally:
         observer.on_event(ObservabilityEvent(event_type="run_end", run_id=run_id))
         observer.close()
+
+
+def _write_metrics_json(
+    *,
+    collector: MetricsCollectorObserver,
+    file_id: str,
+    source_path: Path,
+    input_root: Path,
+    output_root: Path,
+) -> None:
+    try:
+        target = build_output_path(
+            source=source_path,
+            input_root=input_root,
+            output_root=output_root,
+            suffix=".metrics.json",
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        collector.write_file_metrics(file_id=file_id, target_path=target)
+    except Exception as exc:  # pragma: no cover - observability should not break main flow
+        print(
+            f"[asr] warning: failed to write metrics for {source_path}: {exc}",
+            file=sys.stderr,
+        )
 
 
 @app.callback(invoke_without_command=True)
