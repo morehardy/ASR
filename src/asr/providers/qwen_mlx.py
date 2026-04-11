@@ -112,15 +112,14 @@ class QwenMlxProvider:
 
             window_runs: List[WindowRun] = []
             for index, window in enumerate(windows, start=1):
-                with observe_step(
-                    self._observer,
-                    run_id=self._observer_run_id,
-                    file_id=self._observer_file_id,
-                    source_path=self._observer_source_path,
-                    step="provider_window",
-                    meta={"window_index": index, "window_count": len(windows)},
-                ):
-                    window_runs.append(self._execute_window(audio_path, window))
+                window_runs.append(
+                    self._execute_window(
+                        audio_path,
+                        window,
+                        window_index=index,
+                        window_count=len(windows),
+                    )
+                )
             self._evaluate_window_qualities(window_runs)
             self._raise_if_all_windows_failed(window_runs)
 
@@ -198,9 +197,24 @@ class QwenMlxProvider:
             core_text=core_text,
         )
 
-    def _execute_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
+    def _execute_window(
+        self,
+        audio_path: Path,
+        window: AlignmentWindow,
+        *,
+        window_index: int,
+        window_count: int,
+    ) -> WindowRun:
         try:
-            return self._transcribe_window(audio_path, window)
+            with observe_step(
+                self._observer,
+                run_id=self._observer_run_id,
+                file_id=self._observer_file_id,
+                source_path=self._observer_source_path,
+                step="provider_window",
+                meta={"window_index": window_index, "window_count": window_count},
+            ):
+                return self._transcribe_window(audio_path, window)
         except Exception as exc:
             return WindowRun(
                 window=window,

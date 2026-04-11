@@ -417,6 +417,51 @@ class QwenProviderObservabilityTest(unittest.TestCase):
         self.assertIn(("step_end", "provider_merge"), step_events)
         self.assertTrue(any(step == "provider_window" for _, step in step_events))
 
+    def test_provider_failed_window_emits_step_error_event(self) -> None:
+        provider = QwenMlxProvider()
+        provider._probe_duration_sec = lambda _: 340.0
+        provider._resolve_silence_anchor = lambda target, left, right: None
+
+        asr_model = FakeModel(
+            [
+                FakeChunk("hello world", language="en"),
+                RuntimeError("window exploded"),
+                FakeChunk("tail done", language="en"),
+            ]
+        )
+        align_model = FakeModel(
+            [
+                [
+                    FakeChunk("hello", start_time=0.00, end_time=0.45),
+                    FakeChunk("world", start_time=0.46, end_time=0.95),
+                ],
+                [
+                    FakeChunk("tail", start_time=0.00, end_time=0.30),
+                    FakeChunk("done", start_time=0.31, end_time=0.68),
+                ],
+            ]
+        )
+        provider._load_backend = (
+            lambda: (lambda model_id: asr_model if "ASR" in model_id else align_model)
+        )
+
+        observer = _ProviderRecordingObserver()
+        provider.bind_observer(
+            observer=observer,
+            run_id="run-1",
+            file_id="file-1",
+            source_path="demo.wav",
+        )
+
+        provider.transcribe(Path("demo.wav"))
+
+        self.assertTrue(
+            any(
+                event.event_type == "step_error" and event.step == "provider_window"
+                for event in observer.events
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

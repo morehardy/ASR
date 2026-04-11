@@ -131,6 +131,32 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         self.assertIn("[1/2]", output)
         self.assertIn("prepare", output)
 
+    def test_provider_window_step_is_rendered_with_window_index(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=False)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_window",
+                meta={"window_index": 2, "window_count": 8},
+            )
+        )
+
+        output = stream.getvalue()
+        self.assertIn("transcribe (window 2/8)", output)
+
 
 class MetricsCollectorObserverTest(unittest.TestCase):
     def test_writes_metrics_json_with_step_durations(self) -> None:
