@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,8 @@ app = typer.Typer(
     help="Extract subtitles and aligned timestamps from local audio and video.",
     add_completion=False,
 )
+completion_app = typer.Typer(help="Shell completion helpers.")
+app.add_typer(completion_app, name="completion")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -150,6 +153,34 @@ def _validate_granularity(value: str) -> str:
     return value
 
 
+def build_fish_completion_script() -> str:
+    env = dict(os.environ)
+    env["_ASR_COMPLETE"] = "fish_source"
+    proc = subprocess.run(
+        [sys.executable, "-m", "asr"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    if proc.returncode != 0:
+        detail = _first_non_empty_line(proc.stderr) or _first_non_empty_line(proc.stdout)
+        raise RuntimeError(detail or f"completion process failed with exit code {proc.returncode}")
+    if not proc.stdout.strip():
+        raise RuntimeError("completion script output was empty")
+    return proc.stdout
+
+
+@completion_app.command("fish")
+def completion_fish() -> None:
+    try:
+        script = build_fish_completion_script()
+    except RuntimeError as exc:
+        print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1)
+    print(script, end="")
+
+
 def _run_transcription(
     inputs: Sequence[str],
     recursive: bool,
@@ -205,13 +236,12 @@ def _run_transcription(
     return 1 if had_error else 0
 
 
-@app.callback(invoke_without_command=True)
+@app.callback(
+    invoke_without_command=True,
+    context_settings={"allow_extra_args": True, "allow_interspersed_args": True},
+)
 def root(
     ctx: typer.Context,
-    inputs: List[str] = typer.Argument(
-        None,
-        help="File, directory, or glob pattern. Defaults to the current directory.",
-    ),
     recursive: bool = typer.Option(False, "--recursive", help="Recursively scan directory inputs."),
     output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the default output directory root."),
     granularity: str = typer.Option(
@@ -226,7 +256,7 @@ def root(
         return
 
     code = _run_transcription(
-        inputs=inputs or [],
+        inputs=ctx.args,
         recursive=recursive,
         output_dir=output_dir,
         granularity=granularity,

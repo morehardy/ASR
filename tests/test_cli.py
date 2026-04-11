@@ -104,3 +104,27 @@ class CliEnvironmentPreflightTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("environment check failed", stderr.getvalue())
         self.assertIn("MLX unavailable", stderr.getvalue())
+
+
+class CliCompletionOutputTest(unittest.TestCase):
+    @patch("asr.cli.build_fish_completion_script")
+    def test_completion_fish_prints_script(self, mock_build_script) -> None:
+        mock_build_script.return_value = "complete -c asr -f\n"
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            exit_code = main(["completion", "fish"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), "complete -c asr -f\n")
+
+    @patch("asr.cli.build_fish_completion_script")
+    def test_completion_fish_returns_error_when_generation_fails(self, mock_build_script) -> None:
+        mock_build_script.side_effect = RuntimeError("generation failed")
+
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            exit_code = main(["completion", "fish"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("completion generation failed", stderr.getvalue())
