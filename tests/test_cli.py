@@ -4,7 +4,30 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from asr.cli import build_parser, main, resolve_cli_inputs, run_environment_preflight
+from asr.cli import app, build_parser, main, resolve_cli_inputs, run_environment_preflight
+
+
+class CliTyperBootstrapTest(unittest.TestCase):
+    def test_app_symbol_is_available(self) -> None:
+        self.assertTrue(callable(app))
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    def test_main_exits_early_with_readable_error_when_preflight_fails(
+        self,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        mock_discover.return_value = [(Path("demo.mov"), Path.cwd())]
+        mock_preflight.return_value = (False, "MLX unavailable")
+
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            exit_code = main(["demo.mov"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("environment check failed", stderr.getvalue())
+        self.assertIn("MLX unavailable", stderr.getvalue())
 
 
 class CliParserTest(unittest.TestCase):

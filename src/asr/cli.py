@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
+import click
+import typer
+
 from asr.discovery import discover_media_files
 from asr.exporters import render_json, render_srt, render_vtt
 from asr.media import FfmpegMediaPreparer
@@ -22,8 +25,16 @@ _MLX_PREFLIGHT_CODE = (
     "_ = mx.array([0], dtype=mx.int32)\n"
 )
 
+app = typer.Typer(
+    name="asr",
+    help="Extract subtitles and aligned timestamps from local audio and video.",
+    add_completion=False,
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
+    """Backward-compatible parser builder retained for tests and integrations."""
+
     parser = argparse.ArgumentParser(
         prog="asr",
         description="Extract subtitles and aligned timestamps from local audio and video.",
@@ -133,9 +144,20 @@ def run_environment_preflight() -> Tuple[bool, str]:
     return False, f"MLX/Metal preflight failed ({reason})."
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    discovered_sources = discover_cli_sources(args.inputs, recursive=args.recursive)
+def _validate_granularity(value: str) -> str:
+    if value not in ("sentence", "token"):
+        raise typer.BadParameter("Granularity must be one of: sentence, token.")
+    return value
+
+
+def _run_transcription(
+    inputs: Sequence[str],
+    recursive: bool,
+    output_dir: Path | None,
+    granularity: str,
+    verbose: bool,
+) -> int:
+    discovered_sources = discover_cli_sources(inputs, recursive=recursive)
     if not discovered_sources:
         print("No supported media files found.", file=sys.stderr)
         return 1
@@ -150,7 +172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     had_error = False
 
     for source_path, input_root in discovered_sources:
-        output_root = default_output_root(input_root, explicit_output_dir=args.output_dir)
+        output_root = default_output_root(input_root, explicit_output_dir=output_dir)
         try:
             document = process_media_file(
                 source_path=source_path,
@@ -158,9 +180,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 media_preparer=media_preparer,
             )
             rendered_outputs = {
-                ".srt": render_srt(document, granularity=args.granularity),
-                ".vtt": render_vtt(document, granularity=args.granularity),
-                ".json": render_json(document, granularity=args.granularity),
+                ".srt": render_srt(document, granularity=granularity),
+                ".vtt": render_vtt(document, granularity=granularity),
+                ".json": render_json(document, granularity=granularity),
             }
             for suffix, content in rendered_outputs.items():
                 target = build_output_path(
@@ -172,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
 
-            if args.verbose:
+            if verbose:
                 print(f"[asr] processed {source_path} -> {output_root}")
             else:
                 print(source_path)
@@ -181,3 +203,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[asr] failed for {source_path}: {exc}", file=sys.stderr)
 
     return 1 if had_error else 0
+
+
+@app.callback(invoke_without_command=True)
+def root(
+    ctx: typer.Context,
+    inputs: List[str] = typer.Argument(
+        None,
+        help="File, directory, or glob pattern. Defaults to the current directory.",
+    ),
+    recursive: bool = typer.Option(False, "--recursive", help="Recursively scan directory inputs."),
+    output_dir: Path | None = typer.Option(None, "--output-dir", help="Override the default output directory root."),
+    granularity: str = typer.Option(
+        "sentence",
+        "--granularity",
+        callback=_validate_granularity,
+        help="Subtitle and JSON view granularity.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", help="Print detailed progress information."),
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+
+    code = _run_transcription(
+        inputs=inputs or [],
+        recursive=recursive,
+        output_dir=output_dir,
+        granularity=granularity,
+        verbose=verbose,
+    )
+    raise typer.Exit(code=code)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(argv) if argv is not None else sys.argv[1:]
+    try:
+        result = app(args=args, prog_name="asr", standalone_mode=False)
+    except typer.Exit as exc:
+        return int(exc.exit_code)
+    except click.ClickException as exc:
+        exc.show(file=sys.stderr)
+        return int(exc.exit_code)
+    if isinstance(result, int):
+        return result
+    return 0
