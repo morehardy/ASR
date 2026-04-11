@@ -1,0 +1,53 @@
+"""Console progress observer."""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TextIO
+
+from asr.observability.events import ObservabilityEvent
+
+
+@dataclass(slots=True)
+class ConsoleProgressObserver:
+    """Render file/step progress in a single terminal line."""
+
+    stream: TextIO = sys.stdout
+    is_tty: bool | None = None
+    _current_index: int = field(default=0, init=False, repr=False)
+    _current_total: int = field(default=0, init=False, repr=False)
+    _current_name: str = field(default="", init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.is_tty is None:
+            self.is_tty = bool(getattr(self.stream, "isatty", lambda: False)())
+
+    def on_event(self, event: ObservabilityEvent) -> None:
+        if event.event_type == "file_start":
+            self._current_index = int(event.meta.get("index", 0))
+            self._current_total = int(event.meta.get("total", 0))
+            self._current_name = Path(event.source_path or "").name
+            self._write_line("discover")
+            return
+
+        if event.event_type == "step_start":
+            self._write_line(event.step or "step")
+            return
+
+        if event.event_type == "file_end":
+            status = str(event.meta.get("status", "ok"))
+            self._write_line(status, finalize=True)
+
+    def close(self) -> None:
+        return None
+
+    def _write_line(self, step: str, *, finalize: bool = False) -> None:
+        line = f"[{self._current_index}/{self._current_total}] {self._current_name} | {step}"
+        if self.is_tty:
+            tail = "\n" if finalize else ""
+            self.stream.write(f"\r{line}{tail}")
+        else:
+            self.stream.write(line + "\n")
+        self.stream.flush()

@@ -1,5 +1,7 @@
+import io
 import unittest
 
+from asr.observability.console import ConsoleProgressObserver
 from asr.observability.events import ObservabilityEvent
 from asr.observability.observer import ObserverMux
 from asr.observability.timing import observe_step
@@ -95,6 +97,35 @@ class ObservabilityTimingTest(unittest.TestCase):
             ["step_start", "step_error"],
         )
         self.assertIn("prepare failed", observer.events[-1].meta.get("error", ""))
+
+
+class ConsoleProgressObserverTest(unittest.TestCase):
+    def test_non_tty_falls_back_to_plain_lines(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=False)
+
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 2},
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="prepare",
+            )
+        )
+
+        output = stream.getvalue()
+        self.assertIn("[1/2]", output)
+        self.assertIn("prepare", output)
 
 
 if __name__ == "__main__":

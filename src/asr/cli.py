@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Iterable, List, Literal, Sequence, Tuple
 
@@ -17,6 +18,10 @@ import typer
 from asr.discovery import discover_media_files
 from asr.exporters import render_json, render_srt, render_vtt
 from asr.media import FfmpegMediaPreparer
+from asr.observability.console import ConsoleProgressObserver
+from asr.observability.events import ObservabilityEvent
+from asr.observability.observer import ObserverMux
+from asr.observability.timing import observe_step
 from asr.output import build_output_path, default_output_root
 from asr.pipeline import process_media_file
 from asr.providers import create_default_provider
@@ -206,52 +211,133 @@ def _run_transcription(
     granularity: str,
     verbose: bool,
 ) -> int:
-    discovered_sources = discover_cli_sources(inputs, recursive=recursive)
-    if not discovered_sources:
-        print("No supported media files found.", file=sys.stderr)
-        return 1
+    run_id = f"run-{uuid.uuid4().hex[:8]}"
+    observer = ObserverMux(
+        observers=[ConsoleProgressObserver()],
+        warning_sink=lambda message: print(message, file=sys.stderr),
+    )
+    observer.on_event(ObservabilityEvent(event_type="run_start", run_id=run_id))
 
-    ok, message = run_environment_preflight()
-    if not ok:
-        print(f"[asr] environment check failed: {message}", file=sys.stderr)
-        return 1
+    try:
+        discovered_sources = discover_cli_sources(inputs, recursive=recursive)
+        if not discovered_sources:
+            print("No supported media files found.", file=sys.stderr)
+            return 1
 
-    provider = create_default_provider()
-    media_preparer = FfmpegMediaPreparer()
-    had_error = False
+        with observe_step(
+            observer,
+            run_id=run_id,
+            file_id=None,
+            source_path=None,
+            step="preflight",
+        ):
+            ok, message = run_environment_preflight()
+        if not ok:
+            print(f"[asr] environment check failed: {message}", file=sys.stderr)
+            return 1
 
-    for source_path, input_root in discovered_sources:
-        output_root = default_output_root(input_root, explicit_output_dir=output_dir)
-        try:
-            document = process_media_file(
-                source_path=source_path,
-                provider=provider,
-                media_preparer=media_preparer,
-            )
-            rendered_outputs = {
-                ".srt": render_srt(document, granularity=granularity),
-                ".vtt": render_vtt(document, granularity=granularity),
-                ".json": render_json(document, granularity=granularity),
-            }
-            for suffix, content in rendered_outputs.items():
-                target = build_output_path(
-                    source=source_path,
-                    input_root=input_root,
-                    output_root=output_root,
-                    suffix=suffix,
+        provider = create_default_provider()
+        media_preparer = FfmpegMediaPreparer()
+        had_error = False
+
+        for index, (source_path, input_root) in enumerate(discovered_sources, start=1):
+            file_id = str(index)
+            observer.on_event(
+                ObservabilityEvent(
+                    event_type="file_start",
+                    run_id=run_id,
+                    file_id=file_id,
+                    source_path=str(source_path),
+                    meta={"index": index, "total": len(discovered_sources)},
                 )
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+            )
+            output_root = default_output_root(input_root, explicit_output_dir=output_dir)
+            try:
+                document = process_media_file(
+                    source_path=source_path,
+                    provider=provider,
+                    media_preparer=media_preparer,
+                    observer=observer,
+                    run_id=run_id,
+                    file_id=file_id,
+                )
+                with observe_step(
+                    observer,
+                    run_id=run_id,
+                    file_id=file_id,
+                    source_path=str(source_path),
+                    step="render_srt",
+                ):
+                    srt_content = render_srt(document, granularity=granularity)
+                with observe_step(
+                    observer,
+                    run_id=run_id,
+                    file_id=file_id,
+                    source_path=str(source_path),
+                    step="render_vtt",
+                ):
+                    vtt_content = render_vtt(document, granularity=granularity)
+                with observe_step(
+                    observer,
+                    run_id=run_id,
+                    file_id=file_id,
+                    source_path=str(source_path),
+                    step="render_json",
+                ):
+                    json_content = render_json(document, granularity=granularity)
 
-            if verbose:
-                print(f"[asr] processed {source_path} -> {output_root}")
-            else:
-                print(source_path)
-        except Exception as exc:  # pragma: no cover - surfaced to CLI output
-            had_error = True
-            print(f"[asr] failed for {source_path}: {exc}", file=sys.stderr)
+                with observe_step(
+                    observer,
+                    run_id=run_id,
+                    file_id=file_id,
+                    source_path=str(source_path),
+                    step="write_outputs",
+                ):
+                    rendered_outputs = {
+                        ".srt": srt_content,
+                        ".vtt": vtt_content,
+                        ".json": json_content,
+                    }
+                    for suffix, content in rendered_outputs.items():
+                        target = build_output_path(
+                            source=source_path,
+                            input_root=input_root,
+                            output_root=output_root,
+                            suffix=suffix,
+                        )
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(content, encoding="utf-8")
 
-    return 1 if had_error else 0
+                observer.on_event(
+                    ObservabilityEvent(
+                        event_type="file_end",
+                        run_id=run_id,
+                        file_id=file_id,
+                        source_path=str(source_path),
+                        meta={"status": "ok"},
+                    )
+                )
+                if verbose:
+                    print(f"[asr] processed {source_path} -> {output_root}")
+                else:
+                    print(source_path)
+            except Exception as exc:  # pragma: no cover - surfaced to CLI output
+                had_error = True
+                observer.on_event(
+                    ObservabilityEvent(
+                        event_type="file_end",
+                        run_id=run_id,
+                        file_id=file_id,
+                        source_path=str(source_path),
+                        meta={"status": "failed", "error": str(exc)},
+                    )
+                )
+                print(f"[asr] failed for {source_path}: {exc}", file=sys.stderr)
+
+        return 1 if had_error else 0
+    finally:
+        observer.on_event(ObservabilityEvent(event_type="run_end", run_id=run_id))
+        observer.close()
 
 
 @app.callback(invoke_without_command=True)
