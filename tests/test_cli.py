@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from asr.cli import app, build_parser, main, resolve_cli_inputs, run_environment_preflight
+from asr.models import TranscriptionDocument
 
 
 class CliTyperBootstrapTest(unittest.TestCase):
@@ -173,3 +174,61 @@ class CliCompletionInstallTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(target.read_text(encoding="utf-8"), "new-content\n")
+
+
+class CliObservabilityIntegrationTest(unittest.TestCase):
+    @patch("asr.cli.ConsoleProgressObserver")
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_enables_console_progress_by_default(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+        mock_console_observer,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "outputs"
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                segments=[],
+            )
+
+            exit_code = main([str(source), "--output-dir", str(output_root)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(mock_console_observer.called)
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_writes_metrics_json_only_in_verbose_mode(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "out"
+
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                segments=[],
+            )
+
+            exit_code = main(["--verbose", "--output-dir", str(output_root), str(source)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_root / "demo.json").exists())
+            self.assertTrue((output_root / "demo.metrics.json").exists())

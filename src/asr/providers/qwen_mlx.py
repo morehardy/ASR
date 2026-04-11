@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
 from asr.models import Segment, Token, TranscriptionDocument
+from asr.observability.observer import Observer
+from asr.observability.timing import observe_step
 from asr.providers.authority import (
     build_transcript_tokens,
     project_timing_onto_transcript,
@@ -54,18 +56,48 @@ class QwenMlxProvider:
         self._active_audio_path: Optional[Path] = None
         self._silence_anchor_cache: dict[str, List[float]] = {}
         self._context_clip_dir: Optional[Path] = None
+        self._observer: Optional[Observer] = None
+        self._observer_run_id: str = "run-unknown"
+        self._observer_file_id: Optional[str] = None
+        self._observer_source_path: Optional[str] = None
+
+    def bind_observer(
+        self,
+        *,
+        observer: Observer,
+        run_id: str,
+        file_id: str,
+        source_path: str,
+    ) -> None:
+        self._observer = observer
+        self._observer_run_id = run_id
+        self._observer_file_id = file_id
+        self._observer_source_path = source_path
+
+    def clear_observer(self) -> None:
+        self._observer = None
+        self._observer_run_id = "run-unknown"
+        self._observer_file_id = None
+        self._observer_source_path = None
 
     def transcribe(self, audio_path: Path) -> TranscriptionDocument:
         load = self._load_backend()
         self._asr_model = self._asr_model or load(self.asr_model_id)
         self._aligner_model = self._aligner_model or load(self.aligner_model_id)
 
-        total_duration_sec = self._probe_duration_sec(audio_path)
-        self._active_audio_path = audio_path
-        try:
-            windows = self._plan_windows(total_duration_sec)
-        finally:
-            self._active_audio_path = None
+        with observe_step(
+            self._observer,
+            run_id=self._observer_run_id,
+            file_id=self._observer_file_id,
+            source_path=self._observer_source_path,
+            step="provider_plan_windows",
+        ):
+            total_duration_sec = self._probe_duration_sec(audio_path)
+            self._active_audio_path = audio_path
+            try:
+                windows = self._plan_windows(total_duration_sec)
+            finally:
+                self._active_audio_path = None
 
         self._begin_context_windowing()
         try:
@@ -78,21 +110,34 @@ class QwenMlxProvider:
                     segments=[],
                 )
 
-            window_runs = [
-                self._execute_window(audio_path, window)
-                for window in windows
-            ]
+            window_runs: List[WindowRun] = []
+            for index, window in enumerate(windows, start=1):
+                window_runs.append(
+                    self._execute_window(
+                        audio_path,
+                        window,
+                        window_index=index,
+                        window_count=len(windows),
+                    )
+                )
             self._evaluate_window_qualities(window_runs)
             self._raise_if_all_windows_failed(window_runs)
 
-            merged_tokens = self._merge_window_runs(window_runs)
-            segments = self._tokens_to_segments(merged_tokens)
-            if not segments:
-                segments = self._fallback_segments_from_windows(window_runs)
-            segments = self._stabilize_segment_boundaries(
-                segments,
-                total_duration_sec=total_duration_sec,
-            )
+            with observe_step(
+                self._observer,
+                run_id=self._observer_run_id,
+                file_id=self._observer_file_id,
+                source_path=self._observer_source_path,
+                step="provider_merge",
+            ):
+                merged_tokens = self._merge_window_runs(window_runs)
+                segments = self._tokens_to_segments(merged_tokens)
+                if not segments:
+                    segments = self._fallback_segments_from_windows(window_runs)
+                segments = self._stabilize_segment_boundaries(
+                    segments,
+                    total_duration_sec=total_duration_sec,
+                )
 
             return self._build_document(
                 audio_path=audio_path,
@@ -152,9 +197,24 @@ class QwenMlxProvider:
             core_text=core_text,
         )
 
-    def _execute_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
+    def _execute_window(
+        self,
+        audio_path: Path,
+        window: AlignmentWindow,
+        *,
+        window_index: int,
+        window_count: int,
+    ) -> WindowRun:
         try:
-            return self._transcribe_window(audio_path, window)
+            with observe_step(
+                self._observer,
+                run_id=self._observer_run_id,
+                file_id=self._observer_file_id,
+                source_path=self._observer_source_path,
+                step="provider_window",
+                meta={"window_index": window_index, "window_count": window_count},
+            ):
+                return self._transcribe_window(audio_path, window)
         except Exception as exc:
             return WindowRun(
                 window=window,

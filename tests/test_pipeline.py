@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from asr.models import Segment, Token, TranscriptionDocument
+from asr.observability.events import ObservabilityEvent
 from asr.pipeline import process_media_file
 from asr.providers.base import Provider
 
@@ -100,3 +101,44 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(document.source_path, "clip.wav")
         self.assertEqual(document.source_media["provider_metadata"]["window_count"], 3)
         self.assertEqual(document.source_media["prepared_audio_path"], "clip.wav")
+
+
+class RecordingObserver:
+    def __init__(self) -> None:
+        self.events: list[ObservabilityEvent] = []
+
+    def on_event(self, event: ObservabilityEvent) -> None:
+        self.events.append(event)
+
+    def close(self) -> None:
+        return None
+
+
+class PipelineObservabilityTest(unittest.TestCase):
+    def test_pipeline_emits_prepare_then_transcribe_steps(self) -> None:
+        observer = RecordingObserver()
+
+        document = process_media_file(
+            source_path=Path("demo.mp4"),
+            provider=FakeProvider(),
+            media_preparer=FakeMediaPreparer(),
+            observer=observer,
+            run_id="run-1",
+            file_id="file-1",
+        )
+
+        self.assertEqual(document.provider_name, "fake")
+        events = [
+            (event.event_type, event.step)
+            for event in observer.events
+            if event.event_type.startswith("step_")
+        ]
+        self.assertEqual(
+            events,
+            [
+                ("step_start", "prepare"),
+                ("step_end", "prepare"),
+                ("step_start", "transcribe"),
+                ("step_end", "transcribe"),
+            ],
+        )

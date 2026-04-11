@@ -97,8 +97,8 @@ Arguments and flags:
 - `--output-dir`: override default output root
 - `--granularity {sentence,token}`:
   - `sentence`: subtitle entries come from segment boundaries
-- `token`: subtitle/JSON `items` are generated from tokens
-- `--verbose`: print per-file processing summary
+  - `token`: subtitle/JSON `items` are generated from tokens
+- `--verbose`: print detailed per-step timing and export `<name>.metrics.json`
 
 ## Shell Completion (fish)
 
@@ -144,6 +144,7 @@ For each input media file, the CLI writes:
 - `<name>.srt`
 - `<name>.vtt`
 - `<name>.json`
+- `<name>.metrics.json` (only when `--verbose` is enabled)
 
 Default output directory name: `outputs`
 
@@ -250,6 +251,12 @@ uv run --python 3.14 asr --help
 uv run --python 3.14 --extra mlx asr ./demo.mp4 --granularity token --verbose
 ```
 
+### Export verbose metrics JSON for optimization
+
+```bash
+uv run --python 3.14 --extra mlx asr ./demo.mp4 --verbose
+```
+
 ## Runtime Flow (What Happens Internally)
 
 For each media file:
@@ -258,9 +265,11 @@ For each media file:
 2. Environment preflight validates:
    - `ffmpeg` and `ffprobe` availability
    - MLX/Metal basic runtime check
+   - progress starts rendering in terminal (single-line by default)
 3. Media is normalized to mono 16 kHz WAV.
 4. Provider runs windowed ASR + alignment.
 5. Results are exported to `srt`, `vtt`, and `json`.
+6. When `--verbose` is enabled, `<name>.metrics.json` is also exported.
 
 ## Exit Codes and Runtime Behavior
 
