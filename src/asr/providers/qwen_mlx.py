@@ -114,16 +114,7 @@ class QwenMlxProvider:
                     segments=[],
                 )
 
-            window_runs: List[WindowRun] = []
-            for index, window in enumerate(windows, start=1):
-                window_runs.append(
-                    self._execute_window(
-                        audio_path,
-                        window,
-                        window_index=index,
-                        window_count=len(windows),
-                    )
-                )
+            window_runs = self._run_windows(audio_path, windows)
             self._evaluate_window_qualities(window_runs)
             self._raise_if_all_windows_failed(window_runs)
 
