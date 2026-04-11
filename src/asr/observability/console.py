@@ -19,6 +19,7 @@ class ConsoleProgressObserver:
     _current_index: int = field(default=0, init=False, repr=False)
     _current_total: int = field(default=0, init=False, repr=False)
     _current_name: str = field(default="", init=False, repr=False)
+    _file_start_perf: float | None = field(default=None, init=False, repr=False)
     _last_width: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -30,16 +31,20 @@ class ConsoleProgressObserver:
             self._current_index = int(event.meta.get("index", 0))
             self._current_total = int(event.meta.get("total", 0))
             self._current_name = Path(event.source_path or "").name
-            self._write_line("discover")
+            self._file_start_perf = event.perf_counter
+            self._write_line(self._with_elapsed("discover", event.perf_counter))
             return
 
         if event.event_type == "step_start":
-            self._write_line(self._display_step(event))
+            self._write_line(self._with_elapsed(self._display_step(event), event.perf_counter))
             return
 
         if event.event_type == "file_end":
             status = str(event.meta.get("status", "ok"))
-            self._write_line(status, finalize=True)
+            self._write_line(
+                self._with_elapsed(status, event.perf_counter),
+                finalize=True,
+            )
 
     def close(self) -> None:
         return None
@@ -51,6 +56,12 @@ class ConsoleProgressObserver:
             if window_index is not None and window_count is not None:
                 return f"transcribe (window {window_index}/{window_count})"
         return event.step or "step"
+
+    def _with_elapsed(self, label: str, perf_counter: float) -> str:
+        if self._file_start_perf is None:
+            return label
+        elapsed = max(0.0, perf_counter - self._file_start_perf)
+        return f"{label} | {elapsed:.1f}s"
 
     def _write_line(self, step: str, *, finalize: bool = False) -> None:
         line = f"[{self._current_index}/{self._current_total}] {self._current_name} | {step}"

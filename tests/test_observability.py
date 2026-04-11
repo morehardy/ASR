@@ -115,6 +115,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
                 file_id="1",
                 source_path="demo.wav",
                 meta={"index": 1, "total": 2},
+                perf_counter=10.0,
             )
         )
         observer.on_event(
@@ -124,12 +125,14 @@ class ConsoleProgressObserverTest(unittest.TestCase):
                 file_id="1",
                 source_path="demo.wav",
                 step="prepare",
+                perf_counter=10.5,
             )
         )
 
         output = stream.getvalue()
         self.assertIn("[1/2]", output)
         self.assertIn("prepare", output)
+        self.assertIn("0.5s", output)
 
     def test_provider_window_step_is_rendered_with_window_index(self) -> None:
         stream = io.StringIO()
@@ -159,9 +162,31 @@ class ConsoleProgressObserverTest(unittest.TestCase):
 
 
 class MetricsCollectorObserverTest(unittest.TestCase):
-    def test_writes_metrics_json_with_step_durations(self) -> None:
+    def test_writes_metrics_json_with_run_and_provider_summaries(self) -> None:
         collector = MetricsCollectorObserver()
-        collector.on_event(ObservabilityEvent(event_type="run_start", run_id="run-1"))
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="run_start",
+                run_id="run-1",
+                perf_counter=0.0,
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                step="preflight",
+                perf_counter=1.0,
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_end",
+                run_id="run-1",
+                step="preflight",
+                perf_counter=1.2,
+            )
+        )
         collector.on_event(
             ObservabilityEvent(
                 event_type="file_start",
@@ -193,11 +218,60 @@ class MetricsCollectorObserverTest(unittest.TestCase):
         )
         collector.on_event(
             ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_window",
+                perf_counter=11.0,
+                meta={"window_index": 1, "window_count": 3},
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_error",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_window",
+                perf_counter=11.6,
+                meta={"window_index": 1, "window_count": 3, "error": "window exploded"},
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_merge",
+                perf_counter=12.0,
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_end",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_merge",
+                perf_counter=12.4,
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
                 event_type="file_end",
                 run_id="run-1",
                 file_id="1",
                 source_path="demo.wav",
                 meta={"status": "ok"},
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="run_end",
+                run_id="run-1",
+                perf_counter=15.0,
             )
         )
 
@@ -210,6 +284,12 @@ class MetricsCollectorObserverTest(unittest.TestCase):
         self.assertEqual(payload["file"]["status"], "ok")
         self.assertEqual(payload["steps"][0]["name"], "prepare")
         self.assertAlmostEqual(payload["steps"][0]["duration_ms"], 200.0, delta=0.001)
+        self.assertEqual(payload["run"]["steps"][0]["name"], "preflight")
+        self.assertAlmostEqual(payload["run"]["steps"][0]["duration_ms"], 200.0, delta=0.001)
+        self.assertAlmostEqual(payload["run"]["duration_ms"], 15000.0, delta=0.001)
+        self.assertEqual(payload["provider"]["window_count"], 3)
+        self.assertEqual(payload["provider"]["window_steps"][0]["status"], "failed")
+        self.assertAlmostEqual(payload["provider"]["merge_duration_ms"], 400.0, delta=0.001)
 
 
 if __name__ == "__main__":
