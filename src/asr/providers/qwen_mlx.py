@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
@@ -60,6 +61,7 @@ class QwenMlxProvider:
         self._active_audio_path: Optional[Path] = None
         self._silence_anchor_cache: dict[str, List[float]] = {}
         self._context_clip_dir: Optional[Path] = None
+        self._inference_lock = threading.Lock()
         self._observer: Optional[Observer] = None
         self._observer_run_id: str = "run-unknown"
         self._observer_file_id: Optional[str] = None
@@ -154,16 +156,17 @@ class QwenMlxProvider:
     def _transcribe_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
         context_input = self._context_input_path(audio_path, window)
         context_kwargs = self._context_generate_kwargs(window)
-        transcription = self._asr_model.generate(context_input, **context_kwargs)
-        text = getattr(transcription, "text", "").strip()
-        language = self._normalize_language(getattr(transcription, "language", None))
+        with self._inference_lock:
+            transcription = self._asr_model.generate(context_input, **context_kwargs)
+            text = getattr(transcription, "text", "").strip()
+            language = self._normalize_language(getattr(transcription, "language", None))
 
-        align_kwargs = dict(context_kwargs)
-        align_kwargs["text"] = text
-        if language:
-            align_kwargs["language"] = language
+            align_kwargs = dict(context_kwargs)
+            align_kwargs["text"] = text
+            if language:
+                align_kwargs["language"] = language
 
-        aligned_items = list(self._aligner_model.generate(context_input, **align_kwargs))
+            aligned_items = list(self._aligner_model.generate(context_input, **align_kwargs))
         aligner_tokens = [
             self._item_to_token(item, language=language)
             for item in aligned_items
