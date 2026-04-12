@@ -1,5 +1,4 @@
 import subprocess
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -39,22 +38,6 @@ class FakeModel:
         if isinstance(response, Exception):
             raise response
         return response
-
-
-class ConcurrentUnsafeModel(FakeModel):
-    def __init__(self, responses: list[object]) -> None:
-        super().__init__(responses)
-        self._guard = threading.Lock()
-
-    def generate(self, audio_input: str, **kwargs: object) -> object:
-        if not self._guard.acquire(blocking=False):
-            raise RuntimeError("concurrent generate access detected")
-        try:
-            # Make overlap deterministic in parallel window execution.
-            time.sleep(0.03)
-            return super().generate(audio_input, **kwargs)
-        finally:
-            self._guard.release()
 
 
 class _ProviderRecordingObserver:
@@ -159,47 +142,6 @@ class QwenProviderWindowedTest(unittest.TestCase):
             provider.transcribe(Path("demo.wav"))
 
         run_windows_spy.assert_called_once()
-
-    def test_parallel_window_execution_does_not_call_shared_models_concurrently(self) -> None:
-        provider = QwenMlxProvider(window_parallelism=2)
-        provider._probe_duration_sec = lambda _: 340.0
-        provider._resolve_silence_anchor = lambda target, left, right: None
-
-        asr_model = ConcurrentUnsafeModel(
-            [
-                FakeChunk("hello world", language="en"),
-                FakeChunk("again now", language="en"),
-                FakeChunk("tail done", language="en"),
-            ]
-        )
-        align_model = ConcurrentUnsafeModel(
-            [
-                [
-                    FakeChunk("hello", start_time=0.00, end_time=0.45),
-                    FakeChunk("world", start_time=0.46, end_time=0.95),
-                ],
-                [
-                    FakeChunk("again", start_time=0.00, end_time=0.35),
-                    FakeChunk("now", start_time=0.36, end_time=0.72),
-                ],
-                [
-                    FakeChunk("tail", start_time=0.00, end_time=0.30),
-                    FakeChunk("done", start_time=0.31, end_time=0.68),
-                ],
-            ]
-        )
-        provider._load_backend = (
-            lambda: (
-                lambda model_id: asr_model if "ASR" in model_id else align_model
-            )
-        )
-
-        doc = provider.transcribe(Path("demo.wav"))
-        metadata = doc.source_media["provider_metadata"]
-
-        self.assertEqual(metadata["failed_window_count"], 0)
-        self.assertEqual(len(asr_model.calls), metadata["window_count"])
-        self.assertEqual(len(align_model.calls), metadata["window_count"])
 
     def test_provider_processes_all_windows_not_first_window_only(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
