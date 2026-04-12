@@ -267,7 +267,7 @@ For each media file:
    - MLX/Metal basic runtime check
    - progress starts rendering in terminal (single-line by default)
 3. Media is normalized to mono 16 kHz WAV.
-4. Provider runs bounded windowed ASR + alignment (windows execute with bounded parallelism by default).
+4. Provider runs windowed ASR + alignment.
 5. Results are exported to `srt`, `vtt`, and `json`.
 6. When `--verbose` is enabled, `<name>.metrics.json` is also exported.
 
@@ -311,15 +311,6 @@ Fix:
 
 - expected on first run
 - later runs should be faster after cache is populated
-
-### Provider window progress appears out of order
-
-Cause: provider windows execute concurrently (bounded). Progress updates can complete in a different order than window index.
-
-Fix:
-
-- expected behavior; merged output is still assembled in window-index order
-- use `*.metrics.json` for per-window durations and status
 
 ## Notes and Scope
 

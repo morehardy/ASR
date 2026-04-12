@@ -1,5 +1,4 @@
 import subprocess
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -58,11 +57,9 @@ class QwenProviderWindowedTest(unittest.TestCase):
         asr_responses: list[object],
         align_responses: list[object],
         quality_thresholds: QualityThresholds | None = None,
-        window_parallelism: int = 1,
     ) -> tuple[QwenMlxProvider, FakeModel, FakeModel]:
         provider = QwenMlxProvider(
-            quality_thresholds=quality_thresholds or QualityThresholds(),
-            window_parallelism=window_parallelism,
+            quality_thresholds=quality_thresholds or QualityThresholds()
         )
         provider._probe_duration_sec = lambda _: 340.0
         provider._resolve_silence_anchor = lambda target, left, right: None
@@ -75,73 +72,6 @@ class QwenProviderWindowedTest(unittest.TestCase):
             )
         )
         return provider, asr_model, align_model
-
-    def test_window_parallelism_must_be_positive(self) -> None:
-        with self.assertRaisesRegex(ValueError, "window_parallelism must be >= 1"):
-            QwenMlxProvider(window_parallelism=0)
-
-    def test_run_windows_parallel_reassembles_results_by_window_index(self) -> None:
-        provider = QwenMlxProvider(window_parallelism=2)
-        windows = [
-            AlignmentWindow(0, 0.0, 10.0, 0.0, 12.0),
-            AlignmentWindow(1, 10.0, 20.0, 8.0, 22.0),
-            AlignmentWindow(2, 20.0, 30.0, 18.0, 30.0),
-        ]
-        call_order: list[int] = []
-
-        def fake_execute(
-            audio_path: Path,
-            window: AlignmentWindow,
-            *,
-            window_index: int,
-            window_count: int,
-        ) -> WindowRun:
-            _ = audio_path
-            _ = window_count
-            call_order.append(window_index)
-            if window_index == 1:
-                time.sleep(0.03)
-            elif window_index == 3:
-                time.sleep(0.01)
-            return WindowRun(
-                window=window,
-                text=f"w{window_index}",
-                tokens=[
-                    Token(
-                        f"w{window_index}",
-                        float(window_index),
-                        float(window_index) + 0.1,
-                        unit="word",
-                    )
-                ],
-                core_tokens=[
-                    Token(
-                        f"w{window_index}",
-                        float(window_index),
-                        float(window_index) + 0.1,
-                        unit="word",
-                    )
-                ],
-            )
-
-        with patch.object(provider, "_execute_window", side_effect=fake_execute):
-            runs = provider._run_windows(Path("demo.wav"), windows)
-
-        self.assertEqual(sorted(call_order), [1, 2, 3])
-        self.assertEqual([run.window.index for run in runs], [0, 1, 2])
-        self.assertEqual([run.text for run in runs], ["w1", "w2", "w3"])
-
-    def test_transcribe_delegates_window_execution_to_run_windows(self) -> None:
-        provider, _, _ = self._build_provider_with_models(
-            asr_responses=[FakeChunk("hello world", language="en")],
-            align_responses=[[FakeChunk("hello", start_time=0.0, end_time=0.4)]],
-        )
-        provider._probe_duration_sec = lambda _: 140.0
-
-        with patch.object(provider, "_run_windows", wraps=provider._run_windows) as run_windows_spy:
-            provider.transcribe(Path("demo.wav"))
-
-        run_windows_spy.assert_called_once()
 
     def test_provider_processes_all_windows_not_first_window_only(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
