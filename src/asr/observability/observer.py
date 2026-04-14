@@ -40,7 +40,7 @@ class ObserverMux:
                 observer.on_event(event)
             except Exception as exc:  # pragma: no cover - defensive fallback
                 self.warning_sink(
-                    f"[asr] warning: observer {type(observer).__name__} failed: {exc}"
+                    f"[easr] warning: observer {type(observer).__name__} failed: {exc}"
                 )
 
     def close(self) -> None:
@@ -49,5 +49,5 @@ class ObserverMux:
                 observer.close()
             except Exception as exc:  # pragma: no cover - defensive fallback
                 self.warning_sink(
-                    f"[asr] warning: observer {type(observer).__name__} close failed: {exc}"
+                    f"[easr] warning: observer {type(observer).__name__} close failed: {exc}"
                 )

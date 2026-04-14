@@ -96,6 +96,23 @@ class CliEnvironmentPreflightTest(unittest.TestCase):
         self.assertIn("MLX/Metal preflight failed", message)
         self.assertIn("libmlx init failed", message)
 
+    @patch("asr.cli.subprocess.run")
+    @patch("asr.cli.shutil.which")
+    def test_preflight_recommends_mlx_extra_when_module_missing(self, mock_which, mock_run) -> None:
+        mock_which.side_effect = ["/usr/bin/ffmpeg", "/usr/bin/ffprobe"]
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["python", "-c", "import mlx.core"],
+            returncode=1,
+            stdout="",
+            stderr="ModuleNotFoundError: No module named 'mlx'",
+        )
+
+        ok, message = run_environment_preflight()
+
+        self.assertFalse(ok)
+        self.assertIn("echoalign-asr-mlx[mlx]", message)
+        self.assertIn(".[mlx]", message)
+
     @patch("asr.cli.discover_cli_sources")
     @patch("asr.cli.run_environment_preflight")
     def test_main_exits_early_with_readable_error_when_preflight_fails(
@@ -123,26 +140,26 @@ class CliCompletionOutputTest(unittest.TestCase):
         mock_run.return_value = subprocess.CompletedProcess(
             args=["python", "-m", "asr"],
             returncode=0,
-            stdout="complete -c asr -f\n",
+            stdout="complete -c easr -f\n",
             stderr="",
         )
 
         script = build_fish_completion_script()
 
-        self.assertEqual(script, "complete -c asr -f\n")
+        self.assertEqual(script, "complete -c easr -f\n")
         env = mock_run.call_args.kwargs["env"]
-        self.assertEqual(env["_ASR_COMPLETE"], "source_fish")
+        self.assertEqual(env["_EASR_COMPLETE"], "source_fish")
 
     @patch("asr.cli.build_fish_completion_script")
     def test_completion_fish_prints_script(self, mock_build_script) -> None:
-        mock_build_script.return_value = "complete -c asr -f\n"
+        mock_build_script.return_value = "complete -c easr -f\n"
 
         stdout = io.StringIO()
         with patch("sys.stdout", stdout):
             exit_code = main(["completion", "fish"])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(stdout.getvalue(), "complete -c asr -f\n")
+        self.assertEqual(stdout.getvalue(), "complete -c easr -f\n")
 
     @patch("asr.cli.build_fish_completion_script")
     def test_completion_fish_returns_error_when_generation_fails(self, mock_build_script) -> None:
@@ -170,7 +187,7 @@ class CliCompletionOutputTest(unittest.TestCase):
 class CliCompletionInstallTest(unittest.TestCase):
     @patch("asr.cli.build_fish_completion_script")
     def test_completion_install_fish_writes_expected_file(self, mock_build_script) -> None:
-        mock_build_script.return_value = "complete -c asr -f\n"
+        mock_build_script.return_value = "complete -c easr -f\n"
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
             stdout = io.StringIO()
@@ -178,10 +195,10 @@ class CliCompletionInstallTest(unittest.TestCase):
                 with patch("sys.stdout", stdout):
                     exit_code = main(["completion", "install", "fish"])
 
-            target = home / ".config" / "fish" / "completions" / "asr.fish"
+            target = home / ".config" / "fish" / "completions" / "easr.fish"
             self.assertEqual(exit_code, 0)
             self.assertTrue(target.exists())
-            self.assertEqual(target.read_text(encoding="utf-8"), "complete -c asr -f\n")
+            self.assertEqual(target.read_text(encoding="utf-8"), "complete -c easr -f\n")
             self.assertIn(str(target), stdout.getvalue())
 
     @patch("asr.cli.build_fish_completion_script")
@@ -189,7 +206,7 @@ class CliCompletionInstallTest(unittest.TestCase):
         mock_build_script.return_value = "new-content\n"
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
-            target = home / ".config" / "fish" / "completions" / "asr.fish"
+            target = home / ".config" / "fish" / "completions" / "easr.fish"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("old-content\n", encoding="utf-8")
 

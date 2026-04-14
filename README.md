@@ -1,6 +1,6 @@
-# asr
+# echoalign-asr-mlx
 
-`asr` is a local CLI for extracting subtitles and aligned timestamps from audio/video files.
+`easr` is a local CLI for extracting subtitles and aligned timestamps from audio/video files.
 
 It currently targets `macOS + Apple Silicon` and uses an MLX-based provider (`Qwen3-ASR + Qwen3-ForcedAligner`) behind a stable CLI interface.
 
@@ -21,7 +21,8 @@ Current capabilities:
 
 - OS: `macOS` on `Apple Silicon`
 - Python: `>=3.14,<3.15`
-- environment/tooling: `uv`
+- package installer: `pip` or `uv pip`
+- build tooling: `uv` (recommended)
 - system dependencies on `PATH`:
   - `ffmpeg`
   - `ffprobe`
@@ -34,50 +35,114 @@ Default provider models:
 
 ## Installation
 
-1. Install `uv` (see [uv docs](https://docs.astral.sh/uv/)).
-2. Install `ffmpeg` and `ffprobe` with your package manager.
-3. Sync dependencies in project root.
+1. Install `ffmpeg` and `ffprobe` with your package manager.
+2. Install package dependencies with MLX extra.
+
+```bash
+python3.14 -m pip install ".[mlx]"
+```
+
+Alternative (`uv`-managed environment in project root):
 
 ```bash
 uv sync --extra mlx
 ```
 
-4. Verify CLI is available.
+3. Verify CLI is available.
 
 ```bash
-uv run --python 3.14 asr --help
+easr --help
 ```
 
+If you are using `uv sync` in the project checkout without installing into an active shell
+environment, run through `uv`:
+
+```bash
+uv run --python 3.14 --extra mlx easr --help
+```
+
+## Python Package Distribution
+
+Build source + wheel artifacts:
+
+```bash
+uv build
+```
+
+Install wheel in a target environment:
+
+```bash
+python3.14 -m pip install dist/echoalign_asr_mlx-0.1.0-py3-none-any.whl
+```
+
+For full transcription runtime, install with MLX extra:
+
+```bash
+python3.14 -m pip install ".[mlx]"
+```
+
+After publishing to an index (for example PyPI), end users can install with:
+
+```bash
+python3.14 -m pip install "echoalign-asr-mlx[mlx]"
+```
+
+## GitHub Release to PyPI
+
+This repository includes a publish workflow at:
+
+- `.github/workflows/publish-pypi.yml`
+
+Release flow:
+
+1. Configure a Trusted Publisher in PyPI for this project:
+   - project: `echoalign-asr-mlx`
+   - owner/repo: your GitHub repository
+   - workflow: `publish-pypi.yml`
+   - environment: `pypi`
+2. Bump version in `pyproject.toml`.
+3. Create and publish a GitHub Release.
+4. GitHub Actions runs tests, builds distributions, and publishes to PyPI.
+
+The workflow also supports manual trigger with `workflow_dispatch`.
+
 ## Quick Start
+
+The examples below use the installed `easr` command directly. If you are running from a
+project checkout with `uv sync`, prefix commands with:
+
+```bash
+uv run --python 3.14 --extra mlx easr ...
+```
 
 ### Single file
 
 ```bash
-uv run --python 3.14 --extra mlx asr ./demo.mp4 --verbose
+easr ./demo.mp4 --verbose
 ```
 
 ### No input path (defaults to current directory)
 
 ```bash
-uv run --python 3.14 --extra mlx asr
+easr
 ```
 
 ### Directory (non-recursive by default)
 
 ```bash
-uv run --python 3.14 --extra mlx asr ./media
+easr ./media
 ```
 
 ### Directory (recursive)
 
 ```bash
-uv run --python 3.14 --extra mlx asr ./media --recursive --verbose
+easr ./media --recursive --verbose
 ```
 
 ### Glob pattern input
 
 ```bash
-uv run --python 3.14 --extra mlx asr "./media/**/*.mp4" --recursive --verbose
+easr "./media/**/*.mp4" --recursive --verbose
 ```
 
 ## CLI Reference
@@ -85,7 +150,7 @@ uv run --python 3.14 --extra mlx asr "./media/**/*.mp4" --recursive --verbose
 Help output:
 
 ```text
-usage: asr [-h] [--recursive] [--output-dir OUTPUT_DIR]
+usage: easr [-h] [--recursive] [--output-dir OUTPUT_DIR]
            [--granularity {sentence,token}] [--verbose]
            [inputs ...]
 ```
@@ -105,18 +170,18 @@ Arguments and flags:
 Generate fish completion script:
 
 ```bash
-asr completion fish
+easr completion fish
 ```
 
 Install fish completion script:
 
 ```bash
-asr completion install fish
+easr completion install fish
 ```
 
 Install target path:
 
-- `~/.config/fish/completions/asr.fish`
+- `~/.config/fish/completions/easr.fish`
 - existing file is overwritten on install
 
 ## Supported Input Formats
@@ -203,7 +268,7 @@ Example:
 Command used in this repository:
 
 ```bash
-uv run --python 3.14 --extra mlx asr tests/e2e/test1.mov --verbose
+uv run --python 3.14 --extra mlx easr tests/e2e/test1.mov --verbose
 ```
 
 Observed output files:
@@ -242,19 +307,19 @@ PYTHONPATH=src uv run --python 3.14 python -m unittest tests.test_authority
 ### Dry-check CLI parsing/help
 
 ```bash
-uv run --python 3.14 asr --help
+uv run --python 3.14 easr --help
 ```
 
 ### Token-level subtitle export
 
 ```bash
-uv run --python 3.14 --extra mlx asr ./demo.mp4 --granularity token --verbose
+uv run --python 3.14 --extra mlx easr ./demo.mp4 --granularity token --verbose
 ```
 
 ### Export verbose metrics JSON for optimization
 
 ```bash
-uv run --python 3.14 --extra mlx asr ./demo.mp4 --verbose
+uv run --python 3.14 --extra mlx easr ./demo.mp4 --verbose
 ```
 
 ## Runtime Flow (What Happens Internally)
@@ -284,16 +349,16 @@ Batch behavior:
 
 ## Troubleshooting
 
-### `[asr] environment check failed: Missing required media dependency...`
+### `[easr] environment check failed: Missing required media dependency...`
 
 Cause: `ffmpeg` and/or `ffprobe` not found on `PATH`.
 
 Fix:
 
 - install both binaries
-- ensure they are visible in the shell used to run `asr`
+- ensure they are visible in the shell used to run `easr`
 
-### `[asr] environment check failed: MLX/Metal preflight failed...`
+### `[easr] environment check failed: MLX/Metal preflight failed...`
 
 Cause: MLX runtime could not initialize Metal backend (or crashed during preflight).
 

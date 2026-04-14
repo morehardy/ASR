@@ -31,9 +31,13 @@ _MLX_PREFLIGHT_CODE = (
     "import mlx.core as mx\n"
     "_ = mx.array([0], dtype=mx.int32)\n"
 )
+_MLX_RUNTIME_INSTALL_HINT = (
+    "MLX runtime is not installed. Install with `pip install 'echoalign-asr-mlx[mlx]'` "
+    "(published package) or `pip install '.[mlx]'` from a source checkout."
+)
 
 app = typer.Typer(
-    name="asr",
+    name="easr",
     help="Extract subtitles and aligned timestamps from local audio and video.",
     add_completion=False,
 )
@@ -43,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Backward-compatible parser builder retained for tests and integrations."""
 
     parser = argparse.ArgumentParser(
-        prog="asr",
+        prog="easr",
         description="Extract subtitles and aligned timestamps from local audio and video.",
     )
     parser.add_argument(
@@ -141,6 +145,10 @@ def run_environment_preflight() -> Tuple[bool, str]:
     if proc.returncode == 0:
         return True, ""
 
+    combined_output = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    if "No module named 'mlx'" in combined_output:
+        return False, _MLX_RUNTIME_INSTALL_HINT
+
     detail = _first_non_empty_line(proc.stderr) or _first_non_empty_line(proc.stdout)
     if proc.returncode < 0:
         reason = f"process terminated by signal {-proc.returncode}"
@@ -153,7 +161,7 @@ def run_environment_preflight() -> Tuple[bool, str]:
 
 def build_fish_completion_script() -> str:
     env = dict(os.environ)
-    env["_ASR_COMPLETE"] = "source_fish"
+    env["_EASR_COMPLETE"] = "source_fish"
     proc = subprocess.run(
         [sys.executable, "-m", "asr"],
         capture_output=True,
@@ -173,7 +181,7 @@ def run_completion_fish() -> int:
     try:
         script = build_fish_completion_script()
     except RuntimeError as exc:
-        print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
+        print(f"[easr] completion generation failed: {exc}", file=sys.stderr)
         return 1
     print(script, end="")
     return 0
@@ -181,7 +189,7 @@ def run_completion_fish() -> int:
 
 def fish_completion_target(home: Path | None = None) -> Path:
     base = home if home is not None else Path.home()
-    return base / ".config" / "fish" / "completions" / "asr.fish"
+    return base / ".config" / "fish" / "completions" / "easr.fish"
 
 
 def install_fish_completion(script: str, home: Path | None = None) -> Path:
@@ -196,12 +204,12 @@ def run_completion_install_fish() -> int:
         script = build_fish_completion_script()
         target = install_fish_completion(script)
     except RuntimeError as exc:
-        print(f"[asr] completion generation failed: {exc}", file=sys.stderr)
+        print(f"[easr] completion generation failed: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"[asr] completion install failed: {exc}", file=sys.stderr)
+        print(f"[easr] completion install failed: {exc}", file=sys.stderr)
         return 1
-    print(f"[asr] fish completion installed at {target}")
+    print(f"[easr] fish completion installed at {target}")
     return 0
 
 
@@ -238,7 +246,7 @@ def _run_transcription(
         ):
             ok, message = run_environment_preflight()
         if not ok:
-            print(f"[asr] environment check failed: {message}", file=sys.stderr)
+            print(f"[easr] environment check failed: {message}", file=sys.stderr)
             return 1
 
         provider = create_default_provider()
@@ -342,7 +350,7 @@ def _run_transcription(
                         output_root=output_root,
                     )
                 if verbose:
-                    print(f"[asr] processed {source_path} -> {output_root}")
+                    print(f"[easr] processed {source_path} -> {output_root}")
                 else:
                     print(source_path)
             except Exception as exc:  # pragma: no cover - surfaced to CLI output
@@ -364,7 +372,7 @@ def _run_transcription(
                         input_root=input_root,
                         output_root=output_root,
                     )
-                print(f"[asr] failed for {source_path}: {exc}", file=sys.stderr)
+                print(f"[easr] failed for {source_path}: {exc}", file=sys.stderr)
 
         return 1 if had_error else 0
     finally:
@@ -391,7 +399,7 @@ def _write_metrics_json(
         collector.write_file_metrics(file_id=file_id, target_path=target)
     except Exception as exc:  # pragma: no cover - observability should not break main flow
         print(
-            f"[asr] warning: failed to write metrics for {source_path}: {exc}",
+            f"[easr] warning: failed to write metrics for {source_path}: {exc}",
             file=sys.stderr,
         )
 
@@ -431,7 +439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if completion_exit_code is not None:
         return completion_exit_code
     try:
-        result = app(args=args, prog_name="asr", standalone_mode=False)
+        result = app(args=args, prog_name="easr", standalone_mode=False)
     except typer.Exit as exc:
         return int(exc.exit_code)
     except click.ClickException as exc:
@@ -454,7 +462,7 @@ def _dispatch_completion(args: Sequence[str]) -> int | None:
         return run_completion_fish()
     if tail == ["completion", "install", "fish"]:
         return run_completion_install_fish()
-    print("Usage: asr completion fish | asr completion install fish", file=sys.stderr)
+    print("Usage: easr completion fish | easr completion install fish", file=sys.stderr)
     return 2
 
 

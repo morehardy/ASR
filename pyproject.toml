@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "asr"
+name = "echoalign-asr-mlx"
 version = "0.1.0"
 description = "Local CLI for extracting subtitles and aligned timestamps from audio and video."
 readme = "README.md"
@@ -18,7 +18,7 @@ mlx = [
 ]
 
 [project.scripts]
-asr = "asr.cli:main"
+easr = "asr.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/asr"]

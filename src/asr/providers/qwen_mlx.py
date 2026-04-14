@@ -304,7 +304,8 @@ class QwenMlxProvider:
         except ImportError as exc:
             raise RuntimeError(
                 "mlx-audio is required for the default Qwen MLX provider. "
-                "Install the optional dependency set with `uv sync --extra mlx`."
+                "Install the optional dependency set with `pip install 'echoalign-asr-mlx[mlx]'` "
+                "(published package) or `pip install '.[mlx]'` from a source checkout."
             ) from exc
         return load
 
