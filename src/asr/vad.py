@@ -242,10 +242,11 @@ class SileroVadPreprocessor:
         self._model: Any | None = None
 
     def build_plan(self, audio_path: str | PathLike[str] | Path) -> SpeechPlan:
-        duration_sec = self._probe_duration_safely(audio_path)
+        path = Path(audio_path)
+        duration_sec = self._probe_duration_safely(path)
         try:
             model = self._load_model()
-            wav = self._read_audio(audio_path)
+            wav = self._read_audio(path)
             timestamps = self._get_timestamps(wav, model)
             spans = [self._timestamp_to_span(item) for item in timestamps]
             return build_speech_plan(
@@ -260,9 +261,9 @@ class SileroVadPreprocessor:
                 config=self.config,
             )
 
-    def _probe_duration_safely(self, audio_path: str | PathLike[str] | Path) -> float:
+    def _probe_duration_safely(self, audio_path: Path) -> float:
         try:
-            return _safe_duration(float(self._duration_probe(Path(audio_path))))
+            return _safe_duration(float(self._duration_probe(audio_path)))
         except Exception:
             return 0.0
 
@@ -277,7 +278,7 @@ class SileroVadPreprocessor:
         self._model = loader()
         return self._model
 
-    def _read_audio(self, audio_path: str | PathLike[str] | Path) -> Any:
+    def _read_audio(self, audio_path: Path) -> Any:
         reader = self._audio_reader
         if reader is None:
             from silero_vad import read_audio

@@ -1,4 +1,5 @@
 import math
+import os
 import unittest
 
 from asr.vad import (
@@ -182,6 +183,34 @@ class SileroVadPreprocessorTest(unittest.TestCase):
 
         self.assertEqual(plan.status, "ok")
         self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(1.25, 2.5)])
+
+    def test_silero_preprocessor_normalizes_pathlike_before_reading_audio(self) -> None:
+        from asr.vad import SileroVadPreprocessor
+
+        class DemoPath(os.PathLike[str]):
+            def __fspath__(self) -> str:
+                return "demo.wav"
+
+            def __str__(self) -> str:
+                return "not-the-filesystem-path"
+
+        seen_paths: list[str] = []
+
+        def audio_reader(path: str, sampling_rate: int) -> list[float]:
+            seen_paths.append(path)
+            return [0.0] * sampling_rate
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=lambda: "model",
+            audio_reader=audio_reader,
+            timestamp_getter=lambda wav, model, **kwargs: [{"start": 0.0, "end": 1.0}],
+            duration_probe=lambda path: 1.0,
+        )
+
+        plan = preprocessor.build_plan(DemoPath())
+
+        self.assertEqual(plan.status, "ok")
+        self.assertEqual(seen_paths, ["demo.wav"])
 
     def test_silero_preprocessor_returns_failed_plan_when_backend_raises(self) -> None:
         from asr.vad import SileroVadPreprocessor
