@@ -60,3 +60,30 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(payload["granularity"], "token")
         self.assertEqual(payload["items"][1]["text"], "好")
         self.assertIn("source_media", payload)
+
+    def test_json_preserves_vad_metadata_without_affecting_subtitles(self) -> None:
+        document = TranscriptionDocument(
+            source_path="quiet.wav",
+            provider_name="fake",
+            source_media={
+                "vad": {
+                    "enabled": True,
+                    "status": "ok",
+                    "duration_sec": 60.0,
+                    "raw_span_count": 0,
+                    "super_chunk_count": 0,
+                    "config": {"threshold": 0.25},
+                    "super_chunks": [],
+                }
+            },
+            segments=[],
+        )
+
+        srt_text = render_srt(document)
+        vtt_text = render_vtt(document)
+        payload = json.loads(render_json(document))
+
+        self.assertEqual(srt_text, "")
+        self.assertEqual(vtt_text, "WEBVTT\n")
+        self.assertEqual(payload["source_media"]["vad"]["status"], "ok")
+        self.assertEqual(payload["source_media"]["vad"]["super_chunk_count"], 0)
