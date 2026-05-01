@@ -184,6 +184,28 @@ class SileroVadPreprocessorTest(unittest.TestCase):
         self.assertEqual(plan.status, "ok")
         self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(1.25, 2.5)])
 
+    def test_silero_preprocessor_returns_failed_plan_when_duration_probe_raises(self) -> None:
+        from asr.vad import SileroVadPreprocessor
+
+        def unavailable_duration(path: object) -> float:
+            raise RuntimeError("ffprobe unavailable")
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=lambda: "model",
+            audio_reader=lambda path, sampling_rate: [0.0] * sampling_rate,
+            timestamp_getter=lambda wav, model, **kwargs: [
+                {"start": 1.0, "end": 2.0},
+            ],
+            duration_probe=unavailable_duration,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+
+        self.assertEqual(plan.status, "failed")
+        self.assertEqual(plan.duration_sec, 0.0)
+        self.assertIn("duration probe failed", plan.error or "")
+        self.assertIn("ffprobe unavailable", plan.error or "")
+
     def test_silero_preprocessor_normalizes_pathlike_before_reading_audio(self) -> None:
         from asr.vad import SileroVadPreprocessor
 

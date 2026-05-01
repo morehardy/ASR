@@ -217,6 +217,26 @@ class QwenProviderWindowedTest(unittest.TestCase):
             )
             self.assertEqual(diagnostic["super_chunk_index"], 0)
 
+    def test_vad_super_chunk_anchor_resolver_uses_global_timeline(self) -> None:
+        provider = QwenMlxProvider()
+        seen_calls: list[tuple[float, float, float]] = []
+
+        def resolve_anchor(target: float, left: float, right: float) -> float:
+            seen_calls.append((target, left, right))
+            return 448.5
+
+        provider._resolve_silence_anchor = resolve_anchor
+        plan = self._speech_plan(
+            [SuperChunk(0, 300.0, 610.0, 300.0, 620.0, 1)],
+            duration_sec=700.0,
+        )
+
+        windows = provider._plan_windows(700.0, speech_plan=plan)
+
+        self.assertGreaterEqual(len(windows), 2)
+        self.assertEqual(seen_calls[0], (450.0, 438.0, 462.0))
+        self.assertEqual(windows[0].core_end, 448.5)
+
     def test_provider_skips_invalid_vad_super_chunks_and_processes_valid_chunk(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[

@@ -8,8 +8,6 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, Iterable, Literal, Protocol
 
-from asr.providers.media_probe import probe_duration_sec
-
 
 @dataclass(frozen=True, slots=True)
 class VadConfig:
@@ -231,7 +229,7 @@ class SileroVadPreprocessor:
         model_loader: Any | None = None,
         audio_reader: Any | None = None,
         timestamp_getter: Any | None = None,
-        duration_probe: Any = probe_duration_sec,
+        duration_probe: Any | None = None,
     ) -> None:
         self.config = config
         self.sample_rate = sample_rate
@@ -243,7 +241,14 @@ class SileroVadPreprocessor:
 
     def build_plan(self, audio_path: str | PathLike[str] | Path) -> SpeechPlan:
         path = Path(audio_path)
-        duration_sec = self._probe_duration_safely(path)
+        try:
+            duration_sec = self._probe_duration(path)
+        except Exception as exc:
+            return failed_speech_plan(
+                duration_sec=0.0,
+                error=f"duration probe failed: {str(exc) or type(exc).__name__}",
+                config=self.config,
+            )
         try:
             model = self._load_model()
             wav = self._read_audio(path)
@@ -261,11 +266,16 @@ class SileroVadPreprocessor:
                 config=self.config,
             )
 
-    def _probe_duration_safely(self, audio_path: Path) -> float:
-        try:
-            return _safe_duration(float(self._duration_probe(audio_path)))
-        except Exception:
-            return 0.0
+    def _probe_duration(self, audio_path: Path) -> float:
+        duration_probe = self._duration_probe
+        if duration_probe is None:
+            from asr.providers.media_probe import probe_duration_sec
+
+            duration_probe = probe_duration_sec
+        duration_sec = float(duration_probe(audio_path))
+        if not math.isfinite(duration_sec) or duration_sec < 0.0:
+            raise ValueError("duration probe returned an invalid duration")
+        return duration_sec
 
     def _load_model(self) -> Any:
         if self._model is not None:

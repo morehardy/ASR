@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 from asr.models import Segment, Token, TranscriptionDocument
 from asr.observability.observer import Observer
@@ -167,11 +167,11 @@ class QwenMlxProvider:
         *,
         speech_plan: SpeechPlan | None = None,
     ) -> List[AlignmentWindow]:
-        planner = WindowPlanner(
-            self.window_config,
-            anchor_resolver=self._resolve_silence_anchor,
-        )
         if not self._uses_speech_plan(speech_plan):
+            planner = WindowPlanner(
+                self.window_config,
+                anchor_resolver=self._resolve_silence_anchor,
+            )
             return planner.plan(total_duration_sec)
 
         windows: List[AlignmentWindow] = []
@@ -184,6 +184,10 @@ class QwenMlxProvider:
             if chunk_start is None or chunk_end is None:
                 continue
 
+            planner = WindowPlanner(
+                self.window_config,
+                anchor_resolver=self._chunk_anchor_resolver(chunk_start),
+            )
             local_windows = planner.plan(chunk_end - chunk_start)
             for local_window in local_windows:
                 offset = chunk_start
@@ -198,6 +202,25 @@ class QwenMlxProvider:
                     )
                 )
         return windows
+
+    def _chunk_anchor_resolver(
+        self, chunk_start: float
+    ) -> Callable[[float, float, float], Optional[float]]:
+        def resolve(
+            target_split_sec: float,
+            search_start_sec: float,
+            search_end_sec: float,
+        ) -> Optional[float]:
+            resolved = self._resolve_silence_anchor(
+                target_split_sec + chunk_start,
+                search_start_sec + chunk_start,
+                search_end_sec + chunk_start,
+            )
+            if resolved is None:
+                return None
+            return resolved - chunk_start
+
+        return resolve
 
     def _clamped_super_chunk_bounds(
         self,
