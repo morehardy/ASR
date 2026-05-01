@@ -104,7 +104,11 @@ def _provider_accepts_speech_plan(provider: Provider) -> bool:
         signature = inspect.signature(provider.transcribe)
     except (TypeError, ValueError):
         return False
-    return "speech_plan" in signature.parameters
+    parameter = signature.parameters.get("speech_plan")
+    return parameter is not None and parameter.kind in {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
 
 
 def _run_vad_preprocessor(
@@ -156,7 +160,7 @@ def _run_vad_preprocessor(
         end_meta.update(_speech_plan_event_meta(plan))
         observer.on_event(
             ObservabilityEvent(
-                event_type="step_end",
+                event_type="step_error" if plan.status == "failed" else "step_end",
                 run_id=run_id,
                 file_id=file_id,
                 source_path=source_path,

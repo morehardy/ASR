@@ -134,6 +134,28 @@ class KwargsProvider:
         )
 
 
+class PositionalOnlyPlanProvider:
+    name = "positional-only"
+
+    def __init__(self) -> None:
+        self.calls: list[Path] = []
+        self.received_plan: SpeechPlan | None = None
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        speech_plan: SpeechPlan | None = None,
+        /,
+    ) -> TranscriptionDocument:
+        self.calls.append(audio_path)
+        self.received_plan = speech_plan
+        return TranscriptionDocument(
+            source_path=str(audio_path),
+            provider_name=self.name,
+            segments=[],
+        )
+
+
 class LegacyProvider:
     name = "legacy"
 
@@ -244,6 +266,37 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(provider.received_kwargs, {})
         self.assertEqual(document.source_media["vad"]["super_chunk_count"], 1)
 
+    def test_pipeline_does_not_keyword_pass_speech_plan_to_positional_only_provider(self) -> None:
+        speech_plan = SpeechPlan(
+            enabled=True,
+            status="ok",
+            duration_sec=100.0,
+            raw_spans=[SpeechSpan(start=10.0, end=12.0)],
+            super_chunks=[
+                SuperChunk(
+                    index=0,
+                    speech_start=10.0,
+                    speech_end=12.0,
+                    chunk_start=6.0,
+                    chunk_end=16.0,
+                    source_span_count=1,
+                )
+            ],
+            config=DEFAULT_VAD_CONFIG,
+        )
+        provider = PositionalOnlyPlanProvider()
+
+        document = process_media_file(
+            source_path=Path("clip.mp4"),
+            provider=provider,
+            media_preparer=FakeMediaPreparer(),
+            vad_preprocessor=FakeVadPreprocessor(speech_plan),
+        )
+
+        self.assertEqual(provider.calls, [Path("clip.wav")])
+        self.assertIsNone(provider.received_plan)
+        self.assertEqual(document.source_media["vad"]["super_chunk_count"], 1)
+
     def test_pipeline_skips_provider_when_vad_finds_no_speech(self) -> None:
         speech_plan = SpeechPlan(
             enabled=True,
@@ -273,6 +326,7 @@ class PipelineTest(unittest.TestCase):
             error="backend unavailable",
             config=DEFAULT_VAD_CONFIG,
         )
+        observer = RecordingObserver()
         provider = LegacyProvider()
 
         document = process_media_file(
@@ -280,12 +334,29 @@ class PipelineTest(unittest.TestCase):
             provider=provider,
             media_preparer=FakeMediaPreparer(),
             vad_preprocessor=FakeVadPreprocessor(failed_plan),
+            observer=observer,
+            run_id="run-1",
+            file_id="file-1",
         )
 
         self.assertEqual(provider.calls, [Path("demo.wav")])
         self.assertEqual(document.provider_name, "legacy")
         self.assertEqual(document.source_media["vad"]["status"], "failed")
         self.assertIn("backend unavailable", document.source_media["vad"]["error"])
+        vad_events = [
+            event
+            for event in observer.events
+            if event.step == "preprocess_vad"
+        ]
+        self.assertEqual(
+            [(event.event_type, event.step) for event in vad_events],
+            [
+                ("step_start", "preprocess_vad"),
+                ("step_error", "preprocess_vad"),
+            ],
+        )
+        self.assertEqual(vad_events[-1].meta["status"], "failed")
+        self.assertIn("backend unavailable", vad_events[-1].meta["error"])
 
     def test_pipeline_converts_vad_exception_to_failed_plan(self) -> None:
         observer = RecordingObserver()
