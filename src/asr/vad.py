@@ -71,7 +71,7 @@ def disabled_speech_plan(
     return SpeechPlan(
         enabled=False,
         status="disabled",
-        duration_sec=max(0.0, duration_sec),
+        duration_sec=_safe_duration(duration_sec),
         raw_spans=[],
         super_chunks=[],
         config=config,
@@ -87,7 +87,7 @@ def failed_speech_plan(
     return SpeechPlan(
         enabled=True,
         status="failed",
-        duration_sec=max(0.0, duration_sec),
+        duration_sec=_safe_duration(duration_sec),
         raw_spans=[],
         super_chunks=[],
         config=config,

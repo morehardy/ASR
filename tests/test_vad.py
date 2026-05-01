@@ -26,9 +26,11 @@ class VadPlanningTest(unittest.TestCase):
             SpeechSpan(start=10.0, end=12.0),
             SpeechSpan(start=20.0, end=20.0),
             SpeechSpan(start=math.nan, end=22.0),
+            SpeechSpan(start=-2.0, end=1.0, confidence=math.inf),
             SpeechSpan(start=24.0, end=25.0),
             SpeechSpan(start=50.0, end=51.0),
             SpeechSpan(start=70.0, end=75.0),
+            SpeechSpan(start=58.0, end=65.0, confidence=0.9),
         ]
 
         plan = build_speech_plan(
@@ -38,18 +40,57 @@ class VadPlanningTest(unittest.TestCase):
         )
 
         self.assertEqual(plan.status, "ok")
-        self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(10.0, 12.0), (24.0, 25.0), (50.0, 51.0)])
+        self.assertEqual(
+            [(span.start, span.end) for span in plan.raw_spans],
+            [(0.0, 1.0), (10.0, 12.0), (24.0, 25.0), (50.0, 51.0), (58.0, 60.0)],
+        )
+        self.assertIsNone(plan.raw_spans[0].confidence)
+        self.assertEqual(plan.raw_spans[-1].confidence, 0.9)
         self.assertEqual(len(plan.super_chunks), 2)
         first = plan.super_chunks[0]
         second = plan.super_chunks[1]
         self.assertEqual(first.index, 0)
-        self.assertEqual(first.source_span_count, 2)
-        self.assertEqual((first.speech_start, first.speech_end), (10.0, 25.0))
-        self.assertEqual((first.chunk_start, first.chunk_end), (6.0, 29.0))
+        self.assertEqual(first.source_span_count, 3)
+        self.assertEqual((first.speech_start, first.speech_end), (0.0, 25.0))
+        self.assertEqual((first.chunk_start, first.chunk_end), (0.0, 29.0))
         self.assertEqual(second.index, 1)
-        self.assertEqual(second.source_span_count, 1)
-        self.assertEqual((second.speech_start, second.speech_end), (50.0, 51.0))
-        self.assertEqual((second.chunk_start, second.chunk_end), (46.0, 55.0))
+        self.assertEqual(second.source_span_count, 2)
+        self.assertEqual((second.speech_start, second.speech_end), (50.0, 60.0))
+        self.assertEqual((second.chunk_start, second.chunk_end), (46.0, 60.0))
+        self.assertEqual(
+            speech_plan_metadata(plan)["super_chunks"],
+            [
+                {
+                    "index": 0,
+                    "speech_start": 0.0,
+                    "speech_end": 25.0,
+                    "chunk_start": 0.0,
+                    "chunk_end": 29.0,
+                    "source_span_count": 3,
+                },
+                {
+                    "index": 1,
+                    "speech_start": 50.0,
+                    "speech_end": 60.0,
+                    "chunk_start": 46.0,
+                    "chunk_end": 60.0,
+                    "source_span_count": 2,
+                },
+            ],
+        )
+
+    def test_build_speech_plan_sorts_sanitized_spans(self) -> None:
+        plan = build_speech_plan(
+            duration_sec=20.0,
+            raw_spans=[
+                SpeechSpan(start=12.0, end=13.0),
+                SpeechSpan(start=2.0, end=3.0),
+                SpeechSpan(start=8.0, end=9.0),
+            ],
+            config=DEFAULT_VAD_CONFIG,
+        )
+
+        self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(2.0, 3.0), (8.0, 9.0), (12.0, 13.0)])
 
     def test_build_speech_plan_returns_ok_empty_plan_for_no_speech(self) -> None:
         plan = build_speech_plan(
@@ -70,9 +111,20 @@ class VadPlanningTest(unittest.TestCase):
             error="silero import failed",
             config=DEFAULT_VAD_CONFIG,
         )
+        disabled_with_infinite_duration = disabled_speech_plan(
+            duration_sec=math.inf,
+            config=DEFAULT_VAD_CONFIG,
+        )
+        failed_with_infinite_duration = failed_speech_plan(
+            duration_sec=math.inf,
+            error="duration probe failed",
+            config=DEFAULT_VAD_CONFIG,
+        )
 
         disabled_meta = speech_plan_metadata(disabled)
         failed_meta = speech_plan_metadata(failed)
+        disabled_infinite_meta = speech_plan_metadata(disabled_with_infinite_duration)
+        failed_infinite_meta = speech_plan_metadata(failed_with_infinite_duration)
 
         self.assertEqual(disabled.status, "disabled")
         self.assertFalse(disabled_meta["enabled"])
@@ -82,6 +134,8 @@ class VadPlanningTest(unittest.TestCase):
         self.assertEqual(failed_meta["duration_sec"], 12.5)
         self.assertIn("silero import failed", failed_meta["error"])
         self.assertEqual(failed_meta["config"]["threshold"], 0.25)
+        self.assertEqual(disabled_infinite_meta["duration_sec"], 0.0)
+        self.assertEqual(failed_infinite_meta["duration_sec"], 0.0)
 
 
 if __name__ == "__main__":
