@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Subtitle and JSON view granularity.",
     )
     parser.add_argument(
+        "--no-vad",
+        action="store_true",
+        help="Disable voice activity detection preprocessing.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print detailed progress information.",
@@ -219,6 +224,7 @@ def _run_transcription(
     output_dir: Path | None,
     granularity: str,
     verbose: bool,
+    vad_enabled: bool,
 ) -> int:
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     collector = MetricsCollectorObserver() if verbose else None
@@ -281,6 +287,7 @@ def _run_transcription(
                         observer=observer,
                         run_id=run_id,
                         file_id=file_id,
+                        vad_enabled=vad_enabled,
                     )
                 finally:
                     if hasattr(provider, "clear_observer"):
@@ -419,6 +426,11 @@ def root(
         help="Subtitle and JSON view granularity.",
     ),
     verbose: bool = typer.Option(False, "--verbose", help="Print detailed progress information."),
+    no_vad: bool = typer.Option(
+        False,
+        "--no-vad",
+        help="Disable voice activity detection preprocessing.",
+    ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -429,6 +441,7 @@ def root(
         output_dir=output_dir,
         granularity=granularity,
         verbose=verbose,
+        vad_enabled=not no_vad,
     )
     raise typer.Exit(code=code)
 
