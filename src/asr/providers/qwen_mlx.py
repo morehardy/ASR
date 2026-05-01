@@ -20,6 +20,7 @@ from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
 from asr.providers.window_merge import WindowSpan, merge_adjacent_windows
 from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
+from asr.vad import SpeechPlan
 
 
 DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
@@ -80,7 +81,11 @@ class QwenMlxProvider:
         self._observer_file_id = None
         self._observer_source_path = None
 
-    def transcribe(self, audio_path: Path) -> TranscriptionDocument:
+    def transcribe(
+        self,
+        audio_path: Path,
+        speech_plan: SpeechPlan | None = None,
+    ) -> TranscriptionDocument:
         load = self._load_backend()
         self._asr_model = self._asr_model or load(self.asr_model_id)
         self._aligner_model = self._aligner_model or load(self.aligner_model_id)
@@ -95,11 +100,13 @@ class QwenMlxProvider:
             total_duration_sec = self._probe_duration_sec(audio_path)
             self._active_audio_path = audio_path
             try:
-                windows = self._plan_windows(total_duration_sec)
+                windows = self._plan_windows(total_duration_sec, speech_plan=speech_plan)
             finally:
                 self._active_audio_path = None
 
         self._begin_context_windowing()
+        speech_plan_used = self._uses_speech_plan(speech_plan)
+        super_chunk_count = self._super_chunk_count(speech_plan)
         try:
             if not windows:
                 return self._build_document(
@@ -108,6 +115,8 @@ class QwenMlxProvider:
                     windows=windows,
                     window_runs=[],
                     segments=[],
+                    speech_plan_used=speech_plan_used,
+                    super_chunk_count=super_chunk_count,
                 )
 
             window_runs: List[WindowRun] = []
@@ -145,16 +154,53 @@ class QwenMlxProvider:
                 windows=windows,
                 window_runs=window_runs,
                 segments=segments,
+                speech_plan_used=speech_plan_used,
+                super_chunk_count=super_chunk_count,
             )
         finally:
             self._cleanup_context_windowing()
 
-    def _plan_windows(self, total_duration_sec: float) -> List[AlignmentWindow]:
+    def _plan_windows(
+        self,
+        total_duration_sec: float,
+        *,
+        speech_plan: SpeechPlan | None = None,
+    ) -> List[AlignmentWindow]:
         planner = WindowPlanner(
             self.window_config,
             anchor_resolver=self._resolve_silence_anchor,
         )
-        return planner.plan(total_duration_sec)
+        if not self._uses_speech_plan(speech_plan):
+            return planner.plan(total_duration_sec)
+
+        windows: List[AlignmentWindow] = []
+        for chunk in speech_plan.super_chunks:
+            local_windows = planner.plan(chunk.chunk_end - chunk.chunk_start)
+            for local_window in local_windows:
+                offset = chunk.chunk_start
+                windows.append(
+                    AlignmentWindow(
+                        index=len(windows),
+                        core_start=local_window.core_start + offset,
+                        core_end=local_window.core_end + offset,
+                        context_start=local_window.context_start + offset,
+                        context_end=local_window.context_end + offset,
+                        super_chunk_index=chunk.index,
+                    )
+                )
+        return windows
+
+    def _uses_speech_plan(self, speech_plan: SpeechPlan | None) -> bool:
+        return (
+            speech_plan is not None
+            and speech_plan.status == "ok"
+            and bool(speech_plan.super_chunks)
+        )
+
+    def _super_chunk_count(self, speech_plan: SpeechPlan | None) -> int:
+        if speech_plan is None or speech_plan.status != "ok":
+            return 0
+        return len(speech_plan.super_chunks)
 
     def _transcribe_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
         context_input = self._context_input_path(audio_path, window)
@@ -205,6 +251,9 @@ class QwenMlxProvider:
         window_index: int,
         window_count: int,
     ) -> WindowRun:
+        meta = {"window_index": window_index, "window_count": window_count}
+        if window.super_chunk_index is not None:
+            meta["super_chunk_index"] = window.super_chunk_index
         try:
             with observe_step(
                 self._observer,
@@ -212,7 +261,7 @@ class QwenMlxProvider:
                 file_id=self._observer_file_id,
                 source_path=self._observer_source_path,
                 step="provider_window",
-                meta={"window_index": window_index, "window_count": window_count},
+                meta=meta,
             ):
                 return self._transcribe_window(audio_path, window)
         except Exception as exc:
@@ -606,6 +655,8 @@ class QwenMlxProvider:
         windows: List[AlignmentWindow],
         window_runs: List[WindowRun],
         segments: List[Segment],
+        speech_plan_used: bool = False,
+        super_chunk_count: int = 0,
     ) -> TranscriptionDocument:
         detected_language = next(
             (run.language for run in window_runs if run.language is not None),
@@ -618,8 +669,13 @@ class QwenMlxProvider:
             segments=segments,
         )
         document.ensure_source_media()["provider_metadata"] = {
-            "processing_strategy": "windowed_bounded_alignment",
+            "processing_strategy": (
+                "vad_super_chunk_windowed_bounded_alignment"
+                if speech_plan_used
+                else "windowed_bounded_alignment"
+            ),
             "window_count": len(windows),
+            "super_chunk_count": super_chunk_count,
             "duration_sec": total_duration_sec,
             "quality_pass_count": sum(
                 1 for run in window_runs if run.quality is not None and run.quality.passed
@@ -663,6 +719,8 @@ class QwenMlxProvider:
             "context_end": window_run.window.context_end,
             "token_count": len(window_run.tokens),
         }
+        if window_run.window.super_chunk_index is not None:
+            diagnostic["super_chunk_index"] = window_run.window.super_chunk_index
         if window_run.error is not None:
             diagnostic["error"] = window_run.error
             return diagnostic

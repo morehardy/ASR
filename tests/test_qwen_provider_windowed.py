@@ -8,6 +8,7 @@ from asr.observability.events import ObservabilityEvent
 from asr.providers.quality import QualityResult, QualityThresholds
 from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
 from asr.providers.windowing import AlignmentWindow
+from asr.vad import DEFAULT_VAD_CONFIG, SpeechPlan, SpeechSpan, SuperChunk
 
 
 class FakeChunk:
@@ -73,6 +74,23 @@ class QwenProviderWindowedTest(unittest.TestCase):
         )
         return provider, asr_model, align_model
 
+    def _speech_plan(
+        self,
+        chunks: list[SuperChunk],
+        duration_sec: float = 400.0,
+    ) -> SpeechPlan:
+        return SpeechPlan(
+            enabled=True,
+            status="ok",
+            duration_sec=duration_sec,
+            raw_spans=[
+                SpeechSpan(start=chunk.speech_start, end=chunk.speech_end)
+                for chunk in chunks
+            ],
+            super_chunks=chunks,
+            config=DEFAULT_VAD_CONFIG,
+        )
+
     def test_provider_processes_all_windows_not_first_window_only(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[
@@ -121,6 +139,82 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertTrue(diagnostics[-1]["quality"]["passed"])
         self.assertLess(diagnostics[0]["quality"]["boundary_disagreement_score"], 1.0)
         self.assertLess(diagnostics[-1]["quality"]["boundary_disagreement_score"], 1.0)
+
+    def test_provider_processes_vad_super_chunks_on_global_timeline(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("first chunk", language="en"),
+                FakeChunk("second chunk", language="en"),
+            ],
+            align_responses=[
+                [
+                    FakeChunk("first", start_time=0.00, end_time=0.40),
+                    FakeChunk("chunk", start_time=0.41, end_time=0.90),
+                ],
+                [
+                    FakeChunk("second", start_time=0.00, end_time=0.50),
+                    FakeChunk("chunk", start_time=0.51, end_time=1.00),
+                ],
+            ],
+        )
+        plan = self._speech_plan(
+            [
+                SuperChunk(0, 105.0, 120.0, 100.0, 130.0, 1),
+                SuperChunk(1, 285.0, 300.0, 280.0, 310.0, 1),
+            ]
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+
+        metadata = doc.source_media["provider_metadata"]
+        diagnostics = metadata["window_diagnostics"]
+        self.assertEqual(
+            metadata["processing_strategy"],
+            "vad_super_chunk_windowed_bounded_alignment",
+        )
+        self.assertEqual(metadata["super_chunk_count"], 2)
+        self.assertEqual([item["super_chunk_index"] for item in diagnostics], [0, 1])
+        self.assertEqual(len(asr_model.calls), 2)
+        self.assertEqual(len(align_model.calls), 2)
+        self.assertEqual(
+            [
+                round(token.start_time, 2)
+                for segment in doc.segments
+                for token in segment.tokens
+            ],
+            [100.0, 100.41, 280.0, 280.51],
+        )
+
+    def test_provider_splits_long_super_chunk_with_existing_hard_window_budget(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("alpha", language="en"),
+                FakeChunk("beta", language="en"),
+                FakeChunk("gamma", language="en"),
+            ],
+            align_responses=[
+                [FakeChunk("alpha", start_time=0.0, end_time=0.4)],
+                [FakeChunk("beta", start_time=0.0, end_time=0.4)],
+                [FakeChunk("gamma", start_time=0.0, end_time=0.4)],
+            ],
+        )
+        plan = self._speech_plan(
+            [SuperChunk(0, 20.0, 330.0, 10.0, 350.0, 1)],
+            duration_sec=400.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+
+        diagnostics = doc.source_media["provider_metadata"]["window_diagnostics"]
+        self.assertGreater(len(diagnostics), 1)
+        self.assertEqual(len(asr_model.calls), len(diagnostics))
+        self.assertEqual(len(align_model.calls), len(diagnostics))
+        for diagnostic in diagnostics:
+            self.assertLessEqual(
+                diagnostic["context_end"] - diagnostic["context_start"],
+                provider.window_config.max_alignment_window_sec,
+            )
+            self.assertEqual(diagnostic["super_chunk_index"], 0)
 
     def test_single_window_failure_does_not_abort_full_run_and_records_diagnostic(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
