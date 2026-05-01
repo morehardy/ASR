@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 import tempfile
@@ -175,9 +176,17 @@ class QwenMlxProvider:
 
         windows: List[AlignmentWindow] = []
         for chunk in speech_plan.super_chunks:
-            local_windows = planner.plan(chunk.chunk_end - chunk.chunk_start)
+            chunk_start, chunk_end = self._clamped_super_chunk_bounds(
+                chunk.chunk_start,
+                chunk.chunk_end,
+                total_duration_sec,
+            )
+            if chunk_start is None or chunk_end is None:
+                continue
+
+            local_windows = planner.plan(chunk_end - chunk_start)
             for local_window in local_windows:
-                offset = chunk.chunk_start
+                offset = chunk_start
                 windows.append(
                     AlignmentWindow(
                         index=len(windows),
@@ -189,6 +198,25 @@ class QwenMlxProvider:
                     )
                 )
         return windows
+
+    def _clamped_super_chunk_bounds(
+        self,
+        chunk_start: float,
+        chunk_end: float,
+        total_duration_sec: float,
+    ) -> tuple[float | None, float | None]:
+        if not (
+            math.isfinite(chunk_start)
+            and math.isfinite(chunk_end)
+            and math.isfinite(total_duration_sec)
+        ):
+            return None, None
+
+        clamped_start = min(max(0.0, chunk_start), total_duration_sec)
+        clamped_end = min(max(0.0, chunk_end), total_duration_sec)
+        if clamped_end <= clamped_start:
+            return None, None
+        return clamped_start, clamped_end
 
     def _uses_speech_plan(self, speech_plan: SpeechPlan | None) -> bool:
         return (
@@ -334,8 +362,13 @@ class QwenMlxProvider:
         expected_index = window_runs[index].window.index + step
         if candidate.window.index != expected_index:
             return None
+        if not self._same_super_chunk_scope(window_runs[index], candidate):
+            return None
 
         return candidate
+
+    def _same_super_chunk_scope(self, left: WindowRun, right: WindowRun) -> bool:
+        return left.window.super_chunk_index == right.window.super_chunk_index
 
     def _raise_if_all_windows_failed(self, window_runs: List[WindowRun]) -> None:
         if any(window_run.error is None for window_run in window_runs):
@@ -545,6 +578,16 @@ class QwenMlxProvider:
                 continue
 
             if window_run.quality is not None and window_run.quality.passed:
+                if passing_block and not self._same_super_chunk_scope(
+                    passing_block[-1],
+                    window_run,
+                ):
+                    merged_tokens = self._append_tokens(
+                        merged_tokens,
+                        self._merge_passing_block(passing_block),
+                        enforce_monotonic=True,
+                    )
+                    passing_block = []
                 passing_block.append(window_run)
                 continue
 
@@ -668,14 +711,13 @@ class QwenMlxProvider:
             detected_language=detected_language,
             segments=segments,
         )
-        document.ensure_source_media()["provider_metadata"] = {
+        provider_metadata = {
             "processing_strategy": (
                 "vad_super_chunk_windowed_bounded_alignment"
                 if speech_plan_used
                 else "windowed_bounded_alignment"
             ),
             "window_count": len(windows),
-            "super_chunk_count": super_chunk_count,
             "duration_sec": total_duration_sec,
             "quality_pass_count": sum(
                 1 for run in window_runs if run.quality is not None and run.quality.passed
@@ -685,6 +727,9 @@ class QwenMlxProvider:
                 self._build_window_diagnostic(run) for run in window_runs
             ],
         }
+        if speech_plan_used:
+            provider_metadata["super_chunk_count"] = super_chunk_count
+        document.ensure_source_media()["provider_metadata"] = provider_metadata
         return document
 
     def _preferred_tokens_for_window(self, window_run: WindowRun) -> List[Token]:
