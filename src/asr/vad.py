@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from os import PathLike
 from pathlib import Path
 from typing import Any, Iterable, Literal, Protocol
+
+from asr.providers.media_probe import probe_duration_sec
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +218,98 @@ def speech_plan_metadata(plan: SpeechPlan) -> dict[str, Any]:
     if plan.error is not None:
         payload["error"] = plan.error
     return payload
+
+
+class SileroVadPreprocessor:
+    """Build speech plans with Silero VAD, degrading to failed plans on errors."""
+
+    def __init__(
+        self,
+        *,
+        config: VadConfig = DEFAULT_VAD_CONFIG,
+        sample_rate: int = 16_000,
+        model_loader: Any | None = None,
+        audio_reader: Any | None = None,
+        timestamp_getter: Any | None = None,
+        duration_probe: Any = probe_duration_sec,
+    ) -> None:
+        self.config = config
+        self.sample_rate = sample_rate
+        self._model_loader = model_loader
+        self._audio_reader = audio_reader
+        self._timestamp_getter = timestamp_getter
+        self._duration_probe = duration_probe
+        self._model: Any | None = None
+
+    def build_plan(self, audio_path: str | PathLike[str] | Path) -> SpeechPlan:
+        duration_sec = self._probe_duration_safely(audio_path)
+        try:
+            model = self._load_model()
+            wav = self._read_audio(audio_path)
+            timestamps = self._get_timestamps(wav, model)
+            spans = [self._timestamp_to_span(item) for item in timestamps]
+            return build_speech_plan(
+                duration_sec=duration_sec,
+                raw_spans=[span for span in spans if span is not None],
+                config=self.config,
+            )
+        except Exception as exc:
+            return failed_speech_plan(
+                duration_sec=duration_sec,
+                error=str(exc) or type(exc).__name__,
+                config=self.config,
+            )
+
+    def _probe_duration_safely(self, audio_path: str | PathLike[str] | Path) -> float:
+        try:
+            return _safe_duration(float(self._duration_probe(Path(audio_path))))
+        except Exception:
+            return 0.0
+
+    def _load_model(self) -> Any:
+        if self._model is not None:
+            return self._model
+        loader = self._model_loader
+        if loader is None:
+            from silero_vad import load_silero_vad
+
+            loader = load_silero_vad
+        self._model = loader()
+        return self._model
+
+    def _read_audio(self, audio_path: str | PathLike[str] | Path) -> Any:
+        reader = self._audio_reader
+        if reader is None:
+            from silero_vad import read_audio
+
+            reader = read_audio
+        return reader(str(audio_path), sampling_rate=self.sample_rate)
+
+    def _get_timestamps(self, wav: Any, model: Any) -> Iterable[dict[str, Any]]:
+        getter = self._timestamp_getter
+        if getter is None:
+            from silero_vad import get_speech_timestamps
+
+            getter = get_speech_timestamps
+        return getter(
+            wav,
+            model,
+            sampling_rate=self.sample_rate,
+            threshold=self.config.threshold,
+            min_speech_duration_ms=self.config.min_speech_duration_ms,
+            min_silence_duration_ms=self.config.min_silence_duration_ms,
+            speech_pad_ms=self.config.speech_pad_ms,
+            return_seconds=True,
+        )
+
+    def _timestamp_to_span(self, item: dict[str, Any]) -> SpeechSpan | None:
+        raw_start = item.get("start")
+        raw_end = item.get("end")
+        if raw_start is None or raw_end is None:
+            return None
+        start = float(raw_start)
+        end = float(raw_end)
+        return SpeechSpan(start=start, end=end)
 
 
 def _safe_duration(duration_sec: float) -> float:

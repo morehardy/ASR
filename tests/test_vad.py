@@ -138,5 +138,68 @@ class VadPlanningTest(unittest.TestCase):
         self.assertEqual(failed_infinite_meta["duration_sec"], 0.0)
 
 
+class SileroVadPreprocessorTest(unittest.TestCase):
+    def test_silero_preprocessor_requests_second_timestamps(self) -> None:
+        from asr.vad import SileroVadPreprocessor
+
+        seen_kwargs: dict[str, object] = {}
+
+        def timestamp_getter(wav: object, model: object, **kwargs: object) -> list[dict[str, float]]:
+            seen_kwargs.update(kwargs)
+            return [
+                {"start": 1.0, "end": 2.0},
+                {"start": 3.0, "end": 3.5},
+            ]
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=lambda: "model",
+            audio_reader=lambda path, sampling_rate: [0.0] * sampling_rate,
+            timestamp_getter=timestamp_getter,
+            duration_probe=lambda path: 4.0,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+
+        self.assertEqual(plan.status, "ok")
+        self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(1.0, 2.0), (3.0, 3.5)])
+        self.assertTrue(seen_kwargs["return_seconds"])
+        self.assertEqual(plan.config.threshold, 0.25)
+        self.assertEqual(len(plan.super_chunks), 1)
+
+    def test_silero_preprocessor_accepts_second_timestamps(self) -> None:
+        from asr.vad import SileroVadPreprocessor
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=lambda: "model",
+            audio_reader=lambda path, sampling_rate: [0.0] * sampling_rate,
+            timestamp_getter=lambda wav, model, **kwargs: [
+                {"start": 1.25, "end": 2.5},
+            ],
+            duration_probe=lambda path: 5.0,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+
+        self.assertEqual(plan.status, "ok")
+        self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(1.25, 2.5)])
+
+    def test_silero_preprocessor_returns_failed_plan_when_backend_raises(self) -> None:
+        from asr.vad import SileroVadPreprocessor
+
+        def explode() -> object:
+            raise RuntimeError("backend unavailable")
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=explode,
+            duration_probe=lambda path: 9.0,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+
+        self.assertEqual(plan.status, "failed")
+        self.assertEqual(plan.duration_sec, 9.0)
+        self.assertIn("backend unavailable", plan.error or "")
+
+
 if __name__ == "__main__":
     unittest.main()
