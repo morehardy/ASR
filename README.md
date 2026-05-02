@@ -69,10 +69,13 @@ Build source + wheel artifacts:
 uv build
 ```
 
+The package version is derived from Git tags. A clean release build from tag
+`v0.2.1` produces `0.2.1` distributions.
+
 Install wheel in a target environment:
 
 ```bash
-python3.14 -m pip install dist/echoalign_asr_mlx-0.1.0-py3-none-any.whl
+python3.14 -m pip install dist/echoalign_asr_mlx-<version>-py3-none-any.whl
 ```
 
 For full transcription runtime, install with MLX extra:
@@ -100,11 +103,13 @@ Release flow:
    - owner/repo: your GitHub repository
    - workflow: `publish-pypi.yml`
    - environment: `pypi`
-2. Bump version in `pyproject.toml`.
-3. Create and publish a GitHub Release.
-4. GitHub Actions runs tests, builds distributions, and publishes to PyPI.
+2. Merge release-ready code to `main`.
+3. Create and publish a GitHub Release tagged `vX.Y.Z`, for example `v0.2.1`.
+4. GitHub Actions runs tests, builds distributions with the tag-derived version,
+   checks them with Twine, and publishes to PyPI.
 
-The workflow also supports manual trigger with `workflow_dispatch`.
+The workflow also supports manual trigger with `workflow_dispatch`, but manual
+publishing must run from a release tag such as `v0.2.1`.
 
 ## Quick Start
 
