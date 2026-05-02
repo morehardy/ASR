@@ -28,6 +28,7 @@ class AlignmentWindow:
     core_end: float
     context_start: float
     context_end: float
+    super_chunk_index: int | None = None
 
 
 AnchorResolver = Callable[[float, float, float], Optional[float]]

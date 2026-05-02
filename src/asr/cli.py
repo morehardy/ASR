@@ -35,6 +35,8 @@ _MLX_RUNTIME_INSTALL_HINT = (
     "MLX runtime is not installed. Install with `pip install 'echoalign-asr-mlx[mlx]'` "
     "(published package) or `pip install '.[mlx]'` from a source checkout."
 )
+_ROOT_FLAG_OPTIONS = frozenset({"--recursive", "--verbose", "--no-vad"})
+_ROOT_OPTIONS_WITH_VALUES = frozenset({"--output-dir", "--granularity"})
 
 app = typer.Typer(
     name="easr",
@@ -70,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("sentence", "token"),
         default="sentence",
         help="Subtitle and JSON view granularity.",
+    )
+    parser.add_argument(
+        "--no-vad",
+        action="store_true",
+        help="Disable voice activity detection preprocessing.",
     )
     parser.add_argument(
         "--verbose",
@@ -219,6 +226,7 @@ def _run_transcription(
     output_dir: Path | None,
     granularity: str,
     verbose: bool,
+    vad_enabled: bool,
 ) -> int:
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     collector = MetricsCollectorObserver() if verbose else None
@@ -281,6 +289,7 @@ def _run_transcription(
                         observer=observer,
                         run_id=run_id,
                         file_id=file_id,
+                        vad_enabled=vad_enabled,
                     )
                 finally:
                     if hasattr(provider, "clear_observer"):
@@ -419,6 +428,11 @@ def root(
         help="Subtitle and JSON view granularity.",
     ),
     verbose: bool = typer.Option(False, "--verbose", help="Print detailed progress information."),
+    no_vad: bool = typer.Option(
+        False,
+        "--no-vad",
+        help="Disable voice activity detection preprocessing.",
+    ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -429,6 +443,7 @@ def root(
         output_dir=output_dir,
         granularity=granularity,
         verbose=verbose,
+        vad_enabled=not no_vad,
     )
     raise typer.Exit(code=code)
 
@@ -438,6 +453,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     completion_exit_code = _dispatch_completion(args)
     if completion_exit_code is not None:
         return completion_exit_code
+    args = _normalize_root_options(args)
     try:
         result = app(args=args, prog_name="easr", standalone_mode=False)
     except typer.Exit as exc:
@@ -448,6 +464,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     if isinstance(result, int):
         return result
     return 0
+
+
+def _normalize_root_options(args: Sequence[str]) -> List[str]:
+    """Move known root options before variadic inputs so Typer can parse them."""
+
+    options: List[str] = []
+    positionals: List[str] = []
+
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return options + positionals + list(args[index:])
+        if token in _ROOT_FLAG_OPTIONS:
+            options.append(token)
+            index += 1
+            continue
+        if any(token.startswith(f"{option}=") for option in _ROOT_OPTIONS_WITH_VALUES):
+            options.append(token)
+            index += 1
+            continue
+        if token in _ROOT_OPTIONS_WITH_VALUES:
+            if index + 1 < len(args):
+                options.append(token)
+                options.append(args[index + 1])
+                index += 2
+            else:
+                if positionals:
+                    positionals.append(token)
+                else:
+                    options.append(token)
+                index += 1
+            continue
+        positionals.append(token)
+        index += 1
+
+    return options + positionals
 
 
 def _dispatch_completion(args: Sequence[str]) -> int | None:
@@ -467,8 +520,6 @@ def _dispatch_completion(args: Sequence[str]) -> int | None:
 
 
 def _first_positional_index(args: Sequence[str]) -> int | None:
-    options_with_values = {"--output-dir", "--granularity"}
-
     index = 0
     while index < len(args):
         token = args[index]
@@ -476,10 +527,10 @@ def _first_positional_index(args: Sequence[str]) -> int | None:
             next_index = index + 1
             return next_index if next_index < len(args) else None
         if token.startswith("--"):
-            if any(token.startswith(f"{option}=") for option in options_with_values):
+            if any(token.startswith(f"{option}=") for option in _ROOT_OPTIONS_WITH_VALUES):
                 index += 1
                 continue
-            if token in options_with_values:
+            if token in _ROOT_OPTIONS_WITH_VALUES:
                 index += 2
                 continue
             index += 1

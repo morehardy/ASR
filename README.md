@@ -151,7 +151,7 @@ Help output:
 
 ```text
 usage: easr [-h] [--recursive] [--output-dir OUTPUT_DIR]
-           [--granularity {sentence,token}] [--verbose]
+           [--granularity {sentence,token}] [--no-vad] [--verbose]
            [inputs ...]
 ```
 
@@ -163,7 +163,24 @@ Arguments and flags:
 - `--granularity {sentence,token}`:
   - `sentence`: subtitle entries come from segment boundaries
   - `token`: subtitle/JSON `items` are generated from tokens
+- `--no-vad`: disable voice activity detection preprocessing
 - `--verbose`: print detailed per-step timing and export `<name>.metrics.json`
+
+### VAD preprocessing
+
+VAD preprocessing is enabled by default. `easr` first scans prepared audio with
+Silero VAD to find high-recall speech candidates, merges them into padded
+super-chunks, and asks the provider to process only those ranges. Final subtitle
+timestamps remain on the original media timeline.
+
+Use `--no-vad` to restore full-duration provider processing:
+
+```bash
+uv run --python 3.14 --extra mlx easr ./demo.mp4 --no-vad
+```
+
+If VAD fails, transcription falls back to the full-duration provider path. If VAD
+successfully finds no speech, `easr` writes successful empty subtitle outputs.
 
 ## Shell Completion (fish)
 

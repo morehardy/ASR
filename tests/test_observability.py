@@ -291,6 +291,65 @@ class MetricsCollectorObserverTest(unittest.TestCase):
         self.assertEqual(payload["provider"]["window_steps"][0]["status"], "failed")
         self.assertAlmostEqual(payload["provider"]["merge_duration_ms"], 400.0, delta=0.001)
 
+    def test_writes_vad_step_metadata(self) -> None:
+        collector = MetricsCollectorObserver()
+        collector.on_event(ObservabilityEvent(event_type="run_start", run_id="run-1", perf_counter=0.0))
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="preprocess_vad",
+                perf_counter=1.0,
+                meta={"enabled": True},
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="step_end",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="preprocess_vad",
+                perf_counter=1.4,
+                meta={
+                    "status": "ok",
+                    "raw_span_count": 2,
+                    "super_chunk_count": 1,
+                },
+            )
+        )
+        collector.on_event(
+            ObservabilityEvent(
+                event_type="file_end",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"status": "ok"},
+            )
+        )
+        collector.on_event(ObservabilityEvent(event_type="run_end", run_id="run-1", perf_counter=2.0))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / "demo.metrics.json"
+            collector.write_file_metrics(file_id="1", target_path=target)
+            payload = json.loads(target.read_text(encoding="utf-8"))
+
+        vad_step = payload["steps"][0]
+        self.assertEqual(vad_step["name"], "preprocess_vad")
+        self.assertEqual(vad_step["meta"]["status"], "ok")
+        self.assertEqual(vad_step["meta"]["raw_span_count"], 2)
+        self.assertEqual(vad_step["meta"]["super_chunk_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

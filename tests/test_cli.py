@@ -52,6 +52,14 @@ class CliParserTest(unittest.TestCase):
 
         self.assertTrue(args.recursive)
 
+    def test_no_vad_flag_is_opt_out(self) -> None:
+        parser = build_parser()
+        default_args = parser.parse_args([])
+        disabled_args = parser.parse_args(["--no-vad", "demo.mp4"])
+
+        self.assertFalse(default_args.no_vad)
+        self.assertTrue(disabled_args.no_vad)
+
 
 class CliEnvironmentPreflightTest(unittest.TestCase):
     @patch("asr.cli.subprocess.run")
@@ -245,6 +253,88 @@ class CliObservabilityIntegrationTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(mock_console_observer.called)
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_enables_vad_by_default(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "outputs"
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                source_media={"vad": {"status": "ok"}},
+                segments=[],
+            )
+
+            exit_code = main([str(source), "--output-dir", str(output_root)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(mock_process.call_args.kwargs["vad_enabled"])
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_passes_vad_disabled_when_no_vad_is_used(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "outputs"
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                source_media={"vad": {"status": "disabled"}},
+                segments=[],
+            )
+
+            exit_code = main(["--no-vad", str(source), "--output-dir", str(output_root)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(mock_process.call_args.kwargs["vad_enabled"])
+
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_passes_vad_disabled_when_no_vad_follows_input(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "outputs"
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                source_media={"vad": {"status": "disabled"}},
+                segments=[],
+            )
+
+            exit_code = main([str(source), "--no-vad", "--output-dir", str(output_root)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(mock_process.call_args.kwargs["vad_enabled"])
+        self.assertEqual(mock_discover.call_args.args[0], [str(source)])
 
     @patch("asr.cli.discover_cli_sources")
     @patch("asr.cli.run_environment_preflight")

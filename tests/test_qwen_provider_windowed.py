@@ -8,6 +8,7 @@ from asr.observability.events import ObservabilityEvent
 from asr.providers.quality import QualityResult, QualityThresholds
 from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
 from asr.providers.windowing import AlignmentWindow
+from asr.vad import DEFAULT_VAD_CONFIG, SpeechPlan, SpeechSpan, SuperChunk
 
 
 class FakeChunk:
@@ -73,6 +74,23 @@ class QwenProviderWindowedTest(unittest.TestCase):
         )
         return provider, asr_model, align_model
 
+    def _speech_plan(
+        self,
+        chunks: list[SuperChunk],
+        duration_sec: float = 400.0,
+    ) -> SpeechPlan:
+        return SpeechPlan(
+            enabled=True,
+            status="ok",
+            duration_sec=duration_sec,
+            raw_spans=[
+                SpeechSpan(start=chunk.speech_start, end=chunk.speech_end)
+                for chunk in chunks
+            ],
+            super_chunks=chunks,
+            config=DEFAULT_VAD_CONFIG,
+        )
+
     def test_provider_processes_all_windows_not_first_window_only(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[
@@ -104,6 +122,7 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(len(align_model.calls), metadata["window_count"])
         self.assertGreaterEqual(len(doc.segments), 2)
         self.assertEqual(metadata["processing_strategy"], "windowed_bounded_alignment")
+        self.assertNotIn("super_chunk_count", metadata)
         self.assertGreaterEqual(metadata["window_count"], 2)
 
         for (audio_input, kwargs), diagnostic in zip(asr_model.calls, diagnostics):
@@ -121,6 +140,129 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertTrue(diagnostics[-1]["quality"]["passed"])
         self.assertLess(diagnostics[0]["quality"]["boundary_disagreement_score"], 1.0)
         self.assertLess(diagnostics[-1]["quality"]["boundary_disagreement_score"], 1.0)
+
+    def test_provider_processes_vad_super_chunks_on_global_timeline(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("first chunk", language="en"),
+                FakeChunk("second chunk", language="en"),
+            ],
+            align_responses=[
+                [
+                    FakeChunk("first", start_time=0.00, end_time=0.40),
+                    FakeChunk("chunk", start_time=0.41, end_time=0.90),
+                ],
+                [
+                    FakeChunk("second", start_time=0.00, end_time=0.50),
+                    FakeChunk("chunk", start_time=0.51, end_time=1.00),
+                ],
+            ],
+        )
+        plan = self._speech_plan(
+            [
+                SuperChunk(0, 105.0, 120.0, 100.0, 130.0, 1),
+                SuperChunk(1, 285.0, 300.0, 280.0, 310.0, 1),
+            ]
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+
+        metadata = doc.source_media["provider_metadata"]
+        diagnostics = metadata["window_diagnostics"]
+        self.assertEqual(
+            metadata["processing_strategy"],
+            "vad_super_chunk_windowed_bounded_alignment",
+        )
+        self.assertEqual(metadata["super_chunk_count"], 2)
+        self.assertEqual([item["super_chunk_index"] for item in diagnostics], [0, 1])
+        self.assertEqual(len(asr_model.calls), 2)
+        self.assertEqual(len(align_model.calls), 2)
+        self.assertEqual(
+            [
+                round(token.start_time, 2)
+                for segment in doc.segments
+                for token in segment.tokens
+            ],
+            [100.0, 100.41, 280.0, 280.51],
+        )
+
+    def test_provider_splits_long_super_chunk_with_existing_hard_window_budget(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("alpha", language="en"),
+                FakeChunk("beta", language="en"),
+                FakeChunk("gamma", language="en"),
+            ],
+            align_responses=[
+                [FakeChunk("alpha", start_time=0.0, end_time=0.4)],
+                [FakeChunk("beta", start_time=0.0, end_time=0.4)],
+                [FakeChunk("gamma", start_time=0.0, end_time=0.4)],
+            ],
+        )
+        plan = self._speech_plan(
+            [SuperChunk(0, 20.0, 330.0, 10.0, 350.0, 1)],
+            duration_sec=400.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+
+        diagnostics = doc.source_media["provider_metadata"]["window_diagnostics"]
+        self.assertGreater(len(diagnostics), 1)
+        self.assertEqual(len(asr_model.calls), len(diagnostics))
+        self.assertEqual(len(align_model.calls), len(diagnostics))
+        for diagnostic in diagnostics:
+            self.assertLessEqual(
+                diagnostic["context_end"] - diagnostic["context_start"],
+                provider.window_config.max_alignment_window_sec,
+            )
+            self.assertEqual(diagnostic["super_chunk_index"], 0)
+
+    def test_vad_super_chunk_anchor_resolver_uses_global_timeline(self) -> None:
+        provider = QwenMlxProvider()
+        seen_calls: list[tuple[float, float, float]] = []
+
+        def resolve_anchor(target: float, left: float, right: float) -> float:
+            seen_calls.append((target, left, right))
+            return 448.5
+
+        provider._resolve_silence_anchor = resolve_anchor
+        plan = self._speech_plan(
+            [SuperChunk(0, 300.0, 610.0, 300.0, 620.0, 1)],
+            duration_sec=700.0,
+        )
+
+        windows = provider._plan_windows(700.0, speech_plan=plan)
+
+        self.assertGreaterEqual(len(windows), 2)
+        self.assertEqual(seen_calls[0], (450.0, 438.0, 462.0))
+        self.assertEqual(windows[0].core_end, 448.5)
+
+    def test_provider_skips_invalid_vad_super_chunks_and_processes_valid_chunk(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("valid", language="en"),
+            ],
+            align_responses=[
+                [FakeChunk("valid", start_time=0.0, end_time=0.4)],
+            ],
+        )
+        plan = self._speech_plan(
+            [
+                SuperChunk(0, 10.0, 20.0, 50.0, 40.0, 1),
+                SuperChunk(1, 30.0, 40.0, float("nan"), 90.0, 1),
+                SuperChunk(2, 320.0, 370.0, 310.0, 390.0, 1),
+            ],
+            duration_sec=400.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+
+        diagnostics = doc.source_media["provider_metadata"]["window_diagnostics"]
+        self.assertEqual(len(asr_model.calls), 1)
+        self.assertEqual(len(align_model.calls), 1)
+        self.assertEqual([item["super_chunk_index"] for item in diagnostics], [2])
+        self.assertEqual(diagnostics[0]["context_start"], 310.0)
+        self.assertEqual(diagnostics[0]["context_end"], 340.0)
 
     def test_single_window_failure_does_not_abort_full_run_and_records_diagnostic(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
@@ -242,6 +384,48 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(captured_calls[0], ([], []))
         self.assertEqual(captured_calls[1], ([], []))
 
+    def test_super_chunk_gap_does_not_create_quality_boundary_comparison(self) -> None:
+        provider = QwenMlxProvider()
+        left_boundary = [Token("left-edge", 10.0, 10.1, unit="word")]
+        right_boundary = [Token("right-edge", 20.0, 20.1, unit="word")]
+        window_runs = [
+            WindowRun(
+                window=AlignmentWindow(0, 0.0, 10.0, 0.0, 10.0, super_chunk_index=0),
+                text="left",
+                tokens=[Token("left", 1.0, 1.2, unit="word")],
+                right_overlap_tokens=left_boundary,
+                core_text="left",
+            ),
+            WindowRun(
+                window=AlignmentWindow(1, 20.0, 30.0, 20.0, 30.0, super_chunk_index=1),
+                text="right",
+                tokens=[Token("right", 21.0, 21.2, unit="word")],
+                left_overlap_tokens=right_boundary,
+                core_text="right",
+            ),
+        ]
+
+        captured_calls: list[tuple[list[object], list[object]]] = []
+
+        def capture_quality(**kwargs: object) -> QualityResult:
+            captured_calls.append(
+                (
+                    list(kwargs["left_overlap_tokens"]),
+                    list(kwargs["right_overlap_tokens"]),
+                )
+            )
+            return QualityResult(True, 1.0, 0.0, 0.0, 0.0)
+
+        with patch(
+            "asr.providers.qwen_mlx.evaluate_quality",
+            side_effect=capture_quality,
+        ):
+            provider._evaluate_window_qualities(window_runs)
+
+        self.assertEqual(len(captured_calls), 2)
+        self.assertEqual(captured_calls[0], ([], []))
+        self.assertEqual(captured_calls[1], ([], []))
+
     def test_all_windows_fail_raises_explicit_error(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[
@@ -316,6 +500,31 @@ class QwenProviderWindowedTest(unittest.TestCase):
                 for idx in range(1, len(merged_tokens))
             )
         )
+
+    def test_super_chunk_gap_does_not_merge_passing_blocks(self) -> None:
+        provider = QwenMlxProvider()
+        window_runs = [
+            WindowRun(
+                window=AlignmentWindow(0, 0.0, 10.0, 0.0, 10.0, super_chunk_index=0),
+                text="left",
+                tokens=[Token("left", 1.0, 1.2, unit="word")],
+                core_tokens=[Token("left", 1.0, 1.2, unit="word")],
+                quality=QualityResult(True, 1.0, 0.0, 0.0, 0.0),
+            ),
+            WindowRun(
+                window=AlignmentWindow(1, 20.0, 30.0, 20.0, 30.0, super_chunk_index=1),
+                text="right",
+                tokens=[Token("right", 21.0, 21.2, unit="word")],
+                core_tokens=[Token("right", 21.0, 21.2, unit="word")],
+                quality=QualityResult(True, 1.0, 0.0, 0.0, 0.0),
+            ),
+        ]
+
+        with patch("asr.providers.qwen_mlx.merge_adjacent_windows") as merge_mock:
+            merged_tokens = provider._merge_window_runs(window_runs)
+
+        self.assertEqual(merge_mock.call_count, 0)
+        self.assertEqual([token.text for token in merged_tokens], ["left", "right"])
 
     def test_resolve_silence_anchor_uses_parsed_anchor_within_bounds(self) -> None:
         provider = QwenMlxProvider()

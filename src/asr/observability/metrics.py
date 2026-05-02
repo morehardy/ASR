@@ -132,6 +132,7 @@ class MetricsCollectorObserver:
             "ended_at": step["ended_at"],
             "duration_ms": step["duration_ms"],
             "error": step["error"],
+            "meta": dict(step.get("meta", {})),
         }
 
     def _build_provider_summary(self, steps: List[dict]) -> dict:
