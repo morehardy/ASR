@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import asdict, dataclass
 from os import PathLike
 from pathlib import Path
 from typing import Any, Iterable, Literal, Protocol
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +247,7 @@ class SileroVadPreprocessor:
         try:
             duration_sec = self._probe_duration(path)
         except Exception as exc:
+            _LOGGER.debug("VAD duration probe failed for %s", path, exc_info=True)
             return failed_speech_plan(
                 duration_sec=0.0,
                 error=f"duration probe failed: {str(exc) or type(exc).__name__}",
@@ -260,6 +264,7 @@ class SileroVadPreprocessor:
                 config=self.config,
             )
         except Exception as exc:
+            _LOGGER.debug("Silero VAD preprocessing failed for %s", path, exc_info=True)
             return failed_speech_plan(
                 duration_sec=duration_sec,
                 error=str(exc) or type(exc).__name__,

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from asr.models import Segment, Token, TranscriptionDocument
 from asr.observability.events import ObservabilityEvent
-from asr.pipeline import process_media_file
+from asr.pipeline import _provider_accepts_speech_plan, process_media_file
 from asr.providers.base import Provider
 from asr.vad import DEFAULT_VAD_CONFIG, SpeechPlan, SpeechSpan, SuperChunk, failed_speech_plan
 
@@ -113,6 +113,22 @@ class PlanAwareProvider:
             source_path=str(audio_path),
             provider_name=self.name,
             source_media={"provider_metadata": {"processing_strategy": "fake"}},
+            segments=[],
+        )
+
+
+class RequiredPlanProvider:
+    name = "required-plan"
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        speech_plan: SpeechPlan,
+    ) -> TranscriptionDocument:
+        return TranscriptionDocument(
+            source_path=str(audio_path),
+            provider_name=self.name,
             segments=[],
         )
 
@@ -234,6 +250,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(document.source_media["vad"]["status"], "ok")
         self.assertEqual(document.source_media["vad"]["super_chunk_count"], 1)
         self.assertEqual(document.source_media["prepared_audio_path"], "clip.wav")
+
+    def test_required_speech_plan_parameter_is_not_optional_provider_extension(self) -> None:
+        self.assertFalse(_provider_accepts_speech_plan(RequiredPlanProvider()))
 
     def test_pipeline_does_not_pass_speech_plan_to_kwargs_only_provider(self) -> None:
         speech_plan = SpeechPlan(

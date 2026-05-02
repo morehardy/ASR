@@ -199,12 +199,16 @@ class SileroVadPreprocessorTest(unittest.TestCase):
             duration_probe=unavailable_duration,
         )
 
-        plan = preprocessor.build_plan("demo.wav")
+        with self.assertLogs("asr.vad", level="DEBUG") as logs:
+            plan = preprocessor.build_plan("demo.wav")
 
         self.assertEqual(plan.status, "failed")
         self.assertEqual(plan.duration_sec, 0.0)
         self.assertIn("duration probe failed", plan.error or "")
         self.assertIn("ffprobe unavailable", plan.error or "")
+        self.assertTrue(
+            any("VAD duration probe failed for demo.wav" in message for message in logs.output)
+        )
 
     def test_silero_preprocessor_normalizes_pathlike_before_reading_audio(self) -> None:
         from asr.vad import SileroVadPreprocessor
@@ -245,11 +249,15 @@ class SileroVadPreprocessorTest(unittest.TestCase):
             duration_probe=lambda path: 9.0,
         )
 
-        plan = preprocessor.build_plan("demo.wav")
+        with self.assertLogs("asr.vad", level="DEBUG") as logs:
+            plan = preprocessor.build_plan("demo.wav")
 
         self.assertEqual(plan.status, "failed")
         self.assertEqual(plan.duration_sec, 9.0)
         self.assertIn("backend unavailable", plan.error or "")
+        self.assertTrue(
+            any("Silero VAD preprocessing failed for demo.wav" in message for message in logs.output)
+        )
 
 
 if __name__ == "__main__":

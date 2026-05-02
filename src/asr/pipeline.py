@@ -105,10 +105,27 @@ def _provider_accepts_speech_plan(provider: Provider) -> bool:
     except (TypeError, ValueError):
         return False
     parameter = signature.parameters.get("speech_plan")
-    return parameter is not None and parameter.kind in {
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    }
+    return (
+        parameter is not None
+        and parameter.kind
+        in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+        and _parameter_is_optional_extension(parameter)
+    )
+
+
+def _parameter_is_optional_extension(parameter: inspect.Parameter) -> bool:
+    if parameter.default is not inspect.Parameter.empty:
+        return True
+
+    annotation = parameter.annotation
+    if annotation is inspect.Parameter.empty:
+        return False
+    if annotation is None or annotation is type(None):
+        return True
+    return type(None) in getattr(annotation, "__args__", ())
 
 
 def _run_vad_preprocessor(
