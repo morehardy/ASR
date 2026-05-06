@@ -197,6 +197,10 @@ def _speech_plan_event_meta(plan: SpeechPlan) -> dict[str, object]:
     }
     if plan.error is not None:
         meta["error"] = plan.error
+    if plan.error_code is not None:
+        meta["error_code"] = plan.error_code
+    if plan.install_hint is not None:
+        meta["install_hint"] = plan.install_hint
     return meta
 
 

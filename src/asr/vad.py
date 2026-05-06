@@ -11,6 +11,11 @@ from typing import Any, Iterable, Literal, Protocol
 
 _LOGGER = logging.getLogger(__name__)
 
+VAD_MISSING_DEPENDENCY_ERROR_CODE = "vad_dependency_missing"
+VAD_MISSING_DEPENDENCY_INSTALL_HINT = (
+    'pipx install --force --python python3.14 "echoalign-asr-mlx[mlx]"'
+)
+
 
 @dataclass(frozen=True, slots=True)
 class VadConfig:
@@ -60,6 +65,8 @@ class SpeechPlan:
     super_chunks: list[SuperChunk]
     config: VadConfig
     error: str | None = None
+    error_code: str | None = None
+    install_hint: str | None = None
 
 
 class VadPreprocessor(Protocol):
@@ -87,6 +94,8 @@ def failed_speech_plan(
     duration_sec: float,
     error: str,
     config: VadConfig = DEFAULT_VAD_CONFIG,
+    error_code: str | None = None,
+    install_hint: str | None = None,
 ) -> SpeechPlan:
     return SpeechPlan(
         enabled=True,
@@ -96,6 +105,8 @@ def failed_speech_plan(
         super_chunks=[],
         config=config,
         error=error,
+        error_code=error_code,
+        install_hint=install_hint,
     )
 
 
@@ -218,6 +229,10 @@ def speech_plan_metadata(plan: SpeechPlan) -> dict[str, Any]:
     }
     if plan.error is not None:
         payload["error"] = plan.error
+    if plan.error_code is not None:
+        payload["error_code"] = plan.error_code
+    if plan.install_hint is not None:
+        payload["install_hint"] = plan.install_hint
     return payload
 
 
@@ -265,9 +280,9 @@ class SileroVadPreprocessor:
             )
         except Exception as exc:
             _LOGGER.debug("Silero VAD preprocessing failed for %s", path, exc_info=True)
-            return failed_speech_plan(
+            return _failed_speech_plan_from_vad_exception(
                 duration_sec=duration_sec,
-                error=str(exc) or type(exc).__name__,
+                exc=exc,
                 config=self.config,
             )
 
@@ -332,3 +347,33 @@ def _safe_duration(duration_sec: float) -> float:
     if not math.isfinite(duration_sec):
         return 0.0
     return max(0.0, duration_sec)
+
+
+def _failed_speech_plan_from_vad_exception(
+    *,
+    duration_sec: float,
+    exc: Exception,
+    config: VadConfig,
+) -> SpeechPlan:
+    if _is_missing_vad_dependency(exc):
+        return failed_speech_plan(
+            duration_sec=duration_sec,
+            error="VAD dependencies are missing (silero-vad or torchcodec); VAD preprocessing was skipped.",
+            config=config,
+            error_code=VAD_MISSING_DEPENDENCY_ERROR_CODE,
+            install_hint=VAD_MISSING_DEPENDENCY_INSTALL_HINT,
+        )
+    return failed_speech_plan(
+        duration_sec=duration_sec,
+        error=str(exc) or type(exc).__name__,
+        config=config,
+    )
+
+
+def _is_missing_vad_dependency(exc: Exception) -> bool:
+    dependency_names = {"silero_vad", "torchcodec"}
+    message = str(exc)
+    missing_name = getattr(exc, "name", None)
+    if isinstance(exc, ModuleNotFoundError) and missing_name in dependency_names:
+        return True
+    return any(name in message for name in dependency_names)

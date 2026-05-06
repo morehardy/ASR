@@ -15,12 +15,14 @@ class ConsoleProgressObserver:
     """Render file/step progress in a single terminal line."""
 
     stream: TextIO = field(default_factory=lambda: sys.stdout)
+    warning_stream: TextIO = field(default_factory=lambda: sys.stderr)
     is_tty: bool | None = None
     _current_index: int = field(default=0, init=False, repr=False)
     _current_total: int = field(default=0, init=False, repr=False)
     _current_name: str = field(default="", init=False, repr=False)
     _file_start_perf: float | None = field(default=None, init=False, repr=False)
     _last_width: int = field(default=0, init=False, repr=False)
+    _reported_warning_codes: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.is_tty is None:
@@ -37,6 +39,10 @@ class ConsoleProgressObserver:
 
         if event.event_type == "step_start":
             self._write_line(self._with_elapsed(self._display_step(event), event.perf_counter))
+            return
+
+        if event.event_type == "step_error":
+            self._write_step_error_warning(event)
             return
 
         if event.event_type == "file_end":
@@ -73,3 +79,26 @@ class ConsoleProgressObserver:
         else:
             self.stream.write(line + "\n")
         self.stream.flush()
+
+    def _write_step_error_warning(self, event: ObservabilityEvent) -> None:
+        if event.step != "preprocess_vad":
+            return
+        error_code = str(event.meta.get("error_code", ""))
+        if error_code != "vad_dependency_missing":
+            return
+        if error_code in self._reported_warning_codes:
+            return
+        self._reported_warning_codes.add(error_code)
+
+        install_hint = str(event.meta.get("install_hint", "")).strip()
+        message = (
+            "[easr] warning: VAD preprocessing is unavailable because dependencies "
+            "are missing (silero-vad or torchcodec); continuing with full-duration transcription."
+        )
+        if install_hint:
+            message = f"{message} Install with: {install_hint}"
+        if self.is_tty:
+            self.stream.write("\n")
+            self.stream.flush()
+        self.warning_stream.write(message + "\n")
+        self.warning_stream.flush()

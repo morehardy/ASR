@@ -1,4 +1,6 @@
 import unittest
+import tomllib
+from pathlib import Path
 from unittest.mock import patch
 
 import asr
@@ -16,3 +18,9 @@ class PackageMetadataTest(unittest.TestCase):
 
     def test_version_is_defined(self) -> None:
         self.assertTrue(asr.__version__)
+
+    def test_mlx_extra_includes_torchcodec_for_silero_vad_audio_io(self) -> None:
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        mlx_dependencies = pyproject["project"]["optional-dependencies"]["mlx"]
+
+        self.assertIn("torchcodec>=0.11.1", mlx_dependencies)

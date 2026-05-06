@@ -160,6 +160,69 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn("transcribe (window 2/8)", output)
 
+    def test_vad_missing_dependency_warning_is_rendered_once(self) -> None:
+        stream = io.StringIO()
+        warning_stream = io.StringIO()
+        observer = ConsoleProgressObserver(
+            stream=stream,
+            warning_stream=warning_stream,
+            is_tty=False,
+        )
+        event = ObservabilityEvent(
+            event_type="step_error",
+            run_id="run-1",
+            file_id="1",
+            source_path="demo.wav",
+            step="preprocess_vad",
+            meta={
+                "error": "silero-vad is not installed",
+                "error_code": "vad_dependency_missing",
+                "install_hint": 'pipx install --force --python python3.14 "echoalign-asr-mlx[mlx]"',
+            },
+        )
+
+        observer.on_event(event)
+        observer.on_event(event)
+
+        warning_output = warning_stream.getvalue()
+        self.assertEqual(warning_output.count("VAD preprocessing is unavailable"), 1)
+        self.assertIn("continuing with full-duration transcription", warning_output)
+        self.assertIn("echoalign-asr-mlx[mlx]", warning_output)
+
+    def test_vad_missing_dependency_warning_starts_clean_line_after_tty_progress(self) -> None:
+        stream = io.StringIO()
+        warning_stream = io.StringIO()
+        observer = ConsoleProgressObserver(
+            stream=stream,
+            warning_stream=warning_stream,
+            is_tty=True,
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_error",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="preprocess_vad",
+                meta={
+                    "error_code": "vad_dependency_missing",
+                    "install_hint": 'pipx install --force --python python3.14 "echoalign-asr-mlx[mlx]"',
+                },
+            )
+        )
+
+        self.assertTrue(stream.getvalue().endswith("\n"))
+        self.assertIn("dependencies are missing", warning_stream.getvalue())
+
 
 class MetricsCollectorObserverTest(unittest.TestCase):
     def test_writes_metrics_json_with_run_and_provider_summaries(self) -> None:

@@ -259,6 +259,54 @@ class SileroVadPreprocessorTest(unittest.TestCase):
             any("Silero VAD preprocessing failed for demo.wav" in message for message in logs.output)
         )
 
+    def test_silero_preprocessor_marks_missing_dependency_with_install_hint(self) -> None:
+        from asr.vad import SileroVadPreprocessor, speech_plan_metadata
+
+        def missing_silero() -> object:
+            raise ModuleNotFoundError("No module named 'silero_vad'", name="silero_vad")
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=missing_silero,
+            duration_probe=lambda path: 9.0,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+        metadata = speech_plan_metadata(plan)
+
+        self.assertEqual(plan.status, "failed")
+        self.assertEqual(plan.error_code, "vad_dependency_missing")
+        self.assertIn("VAD dependencies are missing", plan.error or "")
+        self.assertIn("silero-vad", plan.error or "")
+        self.assertIn("echoalign-asr-mlx[mlx]", plan.install_hint or "")
+        self.assertEqual(metadata["error_code"], "vad_dependency_missing")
+        self.assertIn("echoalign-asr-mlx[mlx]", metadata["install_hint"])
+
+    def test_silero_preprocessor_marks_missing_torchcodec_with_install_hint(self) -> None:
+        from asr.vad import SileroVadPreprocessor, speech_plan_metadata
+
+        def missing_torchcodec(*args: object, **kwargs: object) -> object:
+            raise RuntimeError(
+                "torchaudio version 2.11.0 requires torchcodec for audio I/O. "
+                "Install torchcodec or pin torchaudio < 2.9"
+            )
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=lambda: object(),
+            audio_reader=missing_torchcodec,
+            duration_probe=lambda path: 9.0,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+        metadata = speech_plan_metadata(plan)
+
+        self.assertEqual(plan.status, "failed")
+        self.assertEqual(plan.error_code, "vad_dependency_missing")
+        self.assertIn("VAD dependencies are missing", plan.error or "")
+        self.assertIn("torchcodec", plan.error or "")
+        self.assertIn("echoalign-asr-mlx[mlx]", plan.install_hint or "")
+        self.assertEqual(metadata["error_code"], "vad_dependency_missing")
+        self.assertIn("echoalign-asr-mlx[mlx]", metadata["install_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()
