@@ -259,6 +259,27 @@ class SileroVadPreprocessorTest(unittest.TestCase):
             any("Silero VAD preprocessing failed for demo.wav" in message for message in logs.output)
         )
 
+    def test_silero_preprocessor_marks_missing_dependency_with_install_hint(self) -> None:
+        from asr.vad import SileroVadPreprocessor, speech_plan_metadata
+
+        def missing_silero() -> object:
+            raise ModuleNotFoundError("No module named 'silero_vad'", name="silero_vad")
+
+        preprocessor = SileroVadPreprocessor(
+            model_loader=missing_silero,
+            duration_probe=lambda path: 9.0,
+        )
+
+        plan = preprocessor.build_plan("demo.wav")
+        metadata = speech_plan_metadata(plan)
+
+        self.assertEqual(plan.status, "failed")
+        self.assertEqual(plan.error_code, "vad_dependency_missing")
+        self.assertIn("silero-vad is not installed", plan.error or "")
+        self.assertIn("echoalign-asr-mlx[mlx]", plan.install_hint or "")
+        self.assertEqual(metadata["error_code"], "vad_dependency_missing")
+        self.assertIn("echoalign-asr-mlx[mlx]", metadata["install_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()
