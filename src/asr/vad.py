@@ -355,10 +355,10 @@ def _failed_speech_plan_from_vad_exception(
     exc: Exception,
     config: VadConfig,
 ) -> SpeechPlan:
-    if _is_missing_silero_dependency(exc):
+    if _is_missing_vad_dependency(exc):
         return failed_speech_plan(
             duration_sec=duration_sec,
-            error="silero-vad is not installed; VAD preprocessing was skipped.",
+            error="VAD dependencies are missing (silero-vad or torchcodec); VAD preprocessing was skipped.",
             config=config,
             error_code=VAD_MISSING_DEPENDENCY_ERROR_CODE,
             install_hint=VAD_MISSING_DEPENDENCY_INSTALL_HINT,
@@ -370,10 +370,10 @@ def _failed_speech_plan_from_vad_exception(
     )
 
 
-def _is_missing_silero_dependency(exc: Exception) -> bool:
-    if not isinstance(exc, ModuleNotFoundError):
-        return False
+def _is_missing_vad_dependency(exc: Exception) -> bool:
+    dependency_names = {"silero_vad", "torchcodec"}
+    message = str(exc)
     missing_name = getattr(exc, "name", None)
-    if missing_name == "silero_vad":
+    if isinstance(exc, ModuleNotFoundError) and missing_name in dependency_names:
         return True
-    return "silero_vad" in str(exc)
+    return any(name in message for name in dependency_names)

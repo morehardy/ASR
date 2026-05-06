@@ -92,10 +92,13 @@ class ConsoleProgressObserver:
 
         install_hint = str(event.meta.get("install_hint", "")).strip()
         message = (
-            "[easr] warning: VAD preprocessing is unavailable because silero-vad "
-            "is not installed; continuing with full-duration transcription."
+            "[easr] warning: VAD preprocessing is unavailable because dependencies "
+            "are missing (silero-vad or torchcodec); continuing with full-duration transcription."
         )
         if install_hint:
             message = f"{message} Install with: {install_hint}"
+        if self.is_tty:
+            self.stream.write("\n")
+            self.stream.flush()
         self.warning_stream.write(message + "\n")
         self.warning_stream.flush()
