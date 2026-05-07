@@ -58,6 +58,10 @@ text can remain on screen for the whole window.
 - Preserve ASR text whenever possible.
 - Never treat an unmatched token's initial zero timestamp as trustworthy timing.
 - Repair token timings before overlap/core ownership decisions.
+- Only aligner-anchored or neighbor-anchored repaired tokens may enter normal
+  token-based segmentation.
+- Preserve fully unresolved text, but time it through fallback segments instead
+  of normal token segmentation.
 - Keep model input ranges and subtitle display ranges separate.
 - Use VAD speech bounds as display guardrails, not as transcript authority.
 - Keep public `Token`, `Segment`, JSON, SRT, VTT, and TXT output contracts stable.
@@ -82,7 +86,7 @@ The public `Token` model remains unchanged. Provider internals may use a wrapper
 that carries timing provenance:
 
 ```python
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 TimingSource = Literal["aligner", "estimated", "unresolved"]
@@ -122,7 +126,33 @@ def project_timing_onto_transcript(
 ```
 
 The Qwen provider should use the detailed path, repair unmatched timings, then
-drop back to plain `Token` objects before public document construction.
+drop usable anchored tokens back to plain `Token` objects before public document
+construction.
+
+`WindowRun` should keep enough internal provenance to decide whether normal
+token segmentation is allowed:
+
+```python
+@dataclass(slots=True)
+class WindowDisplayBounds:
+    start_time: float
+    end_time: float
+    super_chunk_index: int
+
+
+@dataclass(slots=True)
+class WindowRun:
+    ...
+    projected_tokens: list[ProjectedToken] = field(default_factory=list)
+    timing_source_counts: dict[str, int] = field(default_factory=dict)
+    has_timing_anchor: bool = False
+    display_bounds: WindowDisplayBounds | None = None
+```
+
+`WindowRun.tokens`, `core_tokens`, and overlap token lists should contain only
+tokens that are usable for normal token-based segmentation. Fully unresolved
+estimated tokens may be retained in `projected_tokens` for diagnostics, but they
+must not be merged into the normal token stream.
 
 ## Revised Data Flow
 
@@ -131,9 +161,11 @@ ASR text
 -> build_transcript_tokens()
 -> project_timing_onto_transcript_detailed()
 -> repair_unmatched_timings()
--> offset repaired tokens by window.context_start
--> split repaired tokens into left/core/right
--> prefer core plus short same-utterance edge tokens
+-> compute timing_source_counts and has_timing_anchor
+-> if anchored, offset usable repaired tokens by window.context_start
+-> if anchored, split repaired tokens into left/core/right
+-> if anchored, prefer core plus short same-utterance edge tokens
+-> if fully unresolved, preserve text and use fallback segment timing
 -> merge window results
 -> build token-based subtitle segments
 -> stabilize segments with optional VAD display bounds
@@ -148,6 +180,10 @@ repair unmatched timings before _split_window_tokens()
 
 No code should classify left/core/right ownership from an unrepaired
 `0.0 -> 0.0` fallback timestamp.
+
+No code should feed fully unresolved repaired tokens into `_tokens_to_segments()`.
+Those windows must use fallback segment creation, or carry timing provenance until
+segment construction can make the same decision explicitly.
 
 ## Unmatched Token Timing Repair
 
@@ -213,13 +249,23 @@ letting tokens exceed the clip.
 If no token matched the aligner:
 
 - Do not leave tokens at `0.0 -> 0.0` as if that were trustworthy timing.
-- Estimate a short sequence starting at local `0.0`.
-- Mark tokens as `unresolved` if there is no timing anchor.
-- Let provider fallback and display-bound clamping decide whether to keep,
-  shorten, or drop the resulting segment.
+- Set `has_timing_anchor=False` for the window.
+- Mark projected tokens as `unresolved` if they are retained for diagnostics.
+- Do not put these tokens into `WindowRun.tokens`, `core_tokens`, or overlap
+  token lists.
+- Do not let these tokens reach `_tokens_to_segments()`.
+- Use fallback segment creation to preserve the text with short estimated timing.
 
 This keeps ASR text available while making low-confidence timing explicit inside
 the provider.
+
+The core invariant is:
+
+```text
+Only aligner-anchored or neighbor-anchored repaired tokens may enter normal
+token-based segmentation. Fully unresolved tokens are preserved as text but must
+use fallback segment timing.
+```
 
 ## VAD Display Bounds
 
@@ -231,8 +277,8 @@ The VAD model intentionally stores two boundary concepts:
 The provider should keep using `chunk_start/chunk_end` to extract model input,
 but subtitle display should be guarded by speech bounds when available.
 
-Extend provider window planning metadata so each VAD-derived `AlignmentWindow`
-can be associated with display bounds:
+Extend provider window planning metadata so each VAD-derived `WindowRun` carries
+display bounds:
 
 ```python
 @dataclass(frozen=True)
@@ -242,9 +288,12 @@ class WindowDisplayBounds:
     super_chunk_index: int
 ```
 
-The Qwen provider may store this in an internal dictionary keyed by
-`window.index`, avoiding any change to public `AlignmentWindow` if that keeps
-the patch smaller.
+Store these bounds directly on `WindowRun.display_bounds`. Avoid provider-level
+state such as `self._display_bounds_by_window_index` unless implementation
+constraints make it necessary. If provider-level state is used, it must be
+cleared at the start and end of every `transcribe()` call. Explicit `WindowRun`
+ownership is preferred because fallback segment creation, stabilization, and
+diagnostics all operate on `WindowRun` values.
 
 Recommended defaults:
 
@@ -266,16 +315,35 @@ before segment construction.
 
 ## Overlap/Core Ownership
 
-After timing repair and global offsetting, split tokens by overlap with the core
-range rather than only by `token.start_time`:
+After timing repair and global offsetting, determine core ownership by overlap
+with the core range rather than only by `token.start_time`.
+
+Add one shared helper and use it everywhere the provider asks whether a token is
+owned by a core window:
 
 ```python
-def token_overlaps_core(token: Token, window: AlignmentWindow) -> bool:
+def token_overlaps_core(
+    token: Token,
+    *,
+    core_start: float,
+    core_end: float,
+) -> bool:
     token_end = max(token.end_time, token.start_time)
-    return token_end > window.core_start and token.start_time < window.core_end
+    return token_end > core_start and token.start_time < core_end
 ```
 
-Use start-only classification only for tokens with zero duration after repair.
+Use this helper in all three current start-only ownership sites:
+
+- `QwenMlxProvider._split_window_tokens()`
+- `QwenMlxProvider._owned_tokens_for_block()`
+- `window_merge._in_core()`
+
+This prevents a token rescued by `_split_window_tokens()` from being discarded
+later by passing-block ownership filtering or adjacent-window merge ownership.
+
+Use start-only classification only for tokens with zero duration after repair:
+`token.start_time < core_start` remains left overlap, `core_start <= start <
+core_end` remains core, and `start >= core_end` remains right overlap.
 
 Update `_preferred_tokens_for_window()` so it can retain very short same-utterance
 edge tokens:
@@ -296,11 +364,20 @@ large duplicate overlap regions.
 
 ## Segment Construction
 
-Keep `_tokens_to_segments()` as the normal path, but make it consume only repaired
-tokens. Its existing gap and punctuation splitting remain useful.
+Keep `_tokens_to_segments()` as the normal path, but make it consume only usable
+anchored repaired tokens. Its existing gap and punctuation splitting remain
+useful.
 
-Add a maximum readable cue duration, defaulting to `8.0s`. If a segment exceeds
-that duration, split it at the best available boundary in this order:
+Add a target readable cue duration, defaulting to `8.0s`. This is a readability
+target for token-backed segments, not a hard clamp that may contradict token
+timestamps.
+
+```text
+target_max_segment_duration_sec = 8.0
+```
+
+If a token-backed segment exceeds that duration, split it at the best available
+boundary in this order:
 
 1. Existing token gap of at least `1.0s`.
 2. Sentence-ending punctuation.
@@ -309,6 +386,10 @@ that duration, split it at the best available boundary in this order:
 Do not split by character count alone when reliable token timings are available.
 If no valid split point exists, leave the segment intact and let stabilization
 clamp only against total duration, next segment, and VAD display bounds.
+
+Do not clamp a token-backed segment end earlier than one of its token end times
+solely to satisfy the target duration. If a hard limit is needed for a segment
+without tokens, apply it in fallback segment creation instead.
 
 ## Fallback Segment Creation
 
@@ -333,7 +414,7 @@ max_fallback_duration_sec = 6.0
 
 Text duration estimation should be conservative:
 
-- English: approximately `0.22s` per word, minimum `1.0s`.
+- English: approximately `0.35s` per word, minimum `1.2s`.
 - Chinese: approximately `0.12s` per character, minimum `1.0s`.
 - Cap all fallback estimates at `max_fallback_duration_sec`.
 
@@ -352,7 +433,7 @@ def _stabilize_segment_boundaries(
     total_duration_sec: float,
     display_bounds: Sequence[WindowDisplayBounds] | None = None,
     tail_padding_sec: float = 0.12,
-    max_segment_duration_sec: float = 8.0,
+    target_max_segment_duration_sec: float = 8.0,
 ) -> list[Segment]:
     ...
 ```
@@ -381,9 +462,21 @@ when VAD under-detects speech.
 The current quality gate already tracks zero or flat timestamp ratio. Timing
 repair should reduce zero-duration tokens before quality evaluation.
 
-Update quality evaluation inputs so they use repaired token timings. Do not count
-estimated tokens as aligner-perfect, but do allow them to pass if the overall
-window is monotonic, non-flat, and text-consistent.
+Update quality evaluation inputs so they use repaired token timings, and include
+timing source counts in the quality decision used for passing-block merge.
+Estimated tokens should not be "washed" into aligner-quality evidence merely
+because repair made their timestamps monotonic.
+
+Use these provider-internal rules:
+
+- `has_timing_anchor=False` always fails the quality pass and uses fallback
+  segment timing.
+- `unresolved_token_ratio` must be `0.0` for a quality pass.
+- `estimated_token_ratio > 0.30` should prevent the window from joining a
+  passing merge block. The provider may still use anchored preferred tokens for
+  that window, but it should be treated as lower confidence.
+- Repaired windows must still satisfy existing monotonic, zero-or-flat,
+  boundary disagreement, and text divergence thresholds.
 
 If detailed projected tokens are still available at diagnostic time, provider
 metadata may include aggregate internal counts:
@@ -455,11 +548,38 @@ Add tests in `tests/test_qwen_provider_windowed.py`:
 - `test_fallback_segment_does_not_last_until_window_core_end`
   - A window with text but no tokens has a long core range.
   - Expected fallback segment duration is at most `6.0s`.
+- `test_fully_unresolved_window_uses_fallback_not_token_segmentation`
+  - ASR text is present, but no aligner token matches.
+  - Expected: no unresolved tokens enter merged token segmentation, and the
+    final segment uses fallback timing.
 - `test_vad_display_bounds_clamp_segment_tail`
   - A token or fallback segment extends beyond `speech_end`.
   - Expected segment end is no later than `speech_end + tail_pad`.
 - `test_matched_token_timings_are_not_shifted_by_repair`
   - Fully matched tokens keep their aligner timings after repair and offset.
+- `test_core_ownership_helper_is_used_after_merge`
+  - A short repaired token overlaps `core_start` but starts just before it.
+  - Expected: `_split_window_tokens()`, `_owned_tokens_for_block()`, and
+    adjacent-window merge all treat it consistently as core-owned.
+- `test_display_bounds_travel_on_window_run`
+  - A VAD-derived window creates a `WindowRun`.
+  - Expected: fallback, stabilization, and diagnostics can read
+    `window_run.display_bounds` without provider-level lookup state.
+
+### Quality Tests
+
+Add tests in `tests/test_quality.py` or provider quality tests:
+
+- `test_unresolved_tokens_cannot_pass_quality`
+  - Timing source counts include unresolved tokens.
+  - Expected: the window does not join a passing merge block.
+- `test_high_estimated_ratio_downgrades_merge_confidence`
+  - More than 30 percent of usable tokens are estimated.
+  - Expected: repaired preferred tokens may still be used, but the window is not
+    treated as passing-block quality.
+- `test_small_estimated_prefix_is_preserved_without_public_metadata`
+  - A short estimated prefix such as `I` is retained in subtitle text.
+  - Expected: public JSON tokens still omit `timing_source`.
 
 ### Exporter Tests
 
@@ -474,15 +594,24 @@ Add or update exporter tests to confirm:
 
 Implement in small steps:
 
-1. Add `ProjectedToken` and detailed projection while keeping the old public
-   authority function intact.
-2. Add timing repair and authority tests.
-3. Switch Qwen provider internals to detailed projection plus repair.
-4. Adjust split/preferred-token behavior for protected edge tokens.
-5. Add VAD display bounds to provider window metadata and stabilization.
-6. Replace whole-core fallback segments with estimated short segments.
-7. Add max segment duration splitting only after repaired token timing is stable.
-8. Verify full existing unit suite and targeted new regression tests.
+1. Add `ProjectedToken`, `TimingSource`, and detailed projection while keeping
+   the old public authority function intact.
+2. Add `repair_unmatched_timings()` and authority tests, without wiring it into
+   the provider yet.
+3. Extend `WindowRun` with projected token provenance, timing source counts,
+   `has_timing_anchor`, and `display_bounds`.
+4. Switch Qwen provider internals to detailed projection plus repair, ensuring
+   repair happens before offset and split.
+5. Add a shared core-ownership helper and use it in `_split_window_tokens()`,
+   `_owned_tokens_for_block()`, and `window_merge._in_core()`.
+6. Attach `WindowDisplayBounds` directly to `WindowRun`.
+7. Replace whole-core fallback segments with estimated short segments, and route
+   fully unresolved windows to fallback instead of token segmentation.
+8. Add timing-source-aware quality diagnostics and prevent low-confidence windows
+   from joining passing merge blocks.
+9. Add target max segment duration splitting only after repaired token timing is
+   stable.
+10. Verify full existing unit suite and targeted new regression tests.
 
 ## Acceptance Criteria
 
@@ -491,7 +620,10 @@ Implement in small steps:
 - VAD chunk padding no longer causes captions to start at `chunk_start` when
   speech starts later.
 - Fallback subtitles no longer last until a 150-second core window ends.
+- Fully unresolved windows do not feed normal token-based segmentation.
 - Matched aligner timings remain stable.
+- Core ownership uses the same overlap helper in split, block ownership, and
+  adjacent-window merge.
 - Public exporters and JSON schema remain unchanged.
 - Existing non-VAD windowing behavior continues to pass tests.
 
@@ -503,4 +635,5 @@ Implement in small steps:
 - Scope check: the spec is one focused provider timing repair and does not mix in
   CLI, model selection, translation, or diarization work.
 - Ambiguity check: defaults for lead pad, tail pad, max fallback duration, and
-  max readable segment duration are explicit.
+  target readable segment duration are explicit; fully unresolved timing is
+  routed through fallback, not normal token segmentation.
