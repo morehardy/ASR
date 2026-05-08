@@ -153,6 +153,22 @@ class AuthorityTest(unittest.TestCase):
         self.assertEqual([item.timing_source for item in repaired], ["aligner", "unresolved", "aligner"])
         self.assertEqual((repaired[1].token.start_time, repaired[1].token.end_time), (0.0, 0.0))
 
+    def test_unmatched_middle_token_uses_tight_positive_anchor_gap(self) -> None:
+        transcript_tokens = build_transcript_tokens("a x b", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [
+                Token("a", 1.00, 1.10, unit="token"),
+                Token("b", 1.13, 1.40, unit="token"),
+            ],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=2.0)
+
+        self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated", "aligner"])
+        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
+        self.assertLessEqual(repaired[1].token.end_time, repaired[2].token.start_time)
+
     def test_unmatched_trailing_token_is_estimated_after_last_match(self) -> None:
         transcript_tokens = build_transcript_tokens("hello there", language="en")
         projected = project_timing_onto_transcript_detailed(
@@ -175,9 +191,8 @@ class AuthorityTest(unittest.TestCase):
 
         repaired = repair_unmatched_timings(projected, clip_duration_sec=1.20)
 
-        self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated"])
-        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
-        self.assertGreaterEqual(repaired[1].token.end_time, repaired[1].token.start_time)
+        self.assertEqual([item.timing_source for item in repaired], ["aligner", "unresolved"])
+        self.assertEqual((repaired[1].token.start_time, repaired[1].token.end_time), (0.0, 0.0))
 
     def test_fully_unmatched_tokens_remain_unresolved_for_provider_fallback(self) -> None:
         transcript_tokens = build_transcript_tokens("C++ C#", language="en")

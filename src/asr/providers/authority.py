@@ -176,11 +176,25 @@ def _repair_middle_tokens(
     max_estimated_token_duration_sec: float,
 ) -> None:
     count = end_index - start_index
-    available_start = previous_anchor.end_time + _ESTIMATED_TOKEN_GAP_SEC
-    available_end = next_anchor.start_time - _ESTIMATED_TOKEN_GAP_SEC
-    available = available_end - available_start
     if count <= 0:
         return
+
+    raw_start = previous_anchor.end_time
+    raw_end = next_anchor.start_time
+    raw_available = raw_end - raw_start
+    if raw_available <= 0.0:
+        return
+
+    gapped_start = raw_start + _ESTIMATED_TOKEN_GAP_SEC
+    gapped_end = raw_end - _ESTIMATED_TOKEN_GAP_SEC
+    if gapped_end > gapped_start:
+        available_start = gapped_start
+        available_end = gapped_end
+    else:
+        available_start = raw_start
+        available_end = raw_end
+
+    available = available_end - available_start
     if available <= 0.0:
         return
 
@@ -214,8 +228,10 @@ def _repair_trailing_tokens(
             max_estimated_token_duration_sec=max_estimated_token_duration_sec,
         )
         start_time = cursor + _ESTIMATED_TOKEN_GAP_SEC
+        if clip_end is not None and start_time > clip_end:
+            return
         end_time = start_time + duration
-        if clip_end is not None and clip_end >= start_time:
+        if clip_end is not None:
             end_time = min(end_time, clip_end)
         repaired[index] = _with_estimated_timing(repaired[index], start_time, end_time)
         cursor = end_time
