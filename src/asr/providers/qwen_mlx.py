@@ -840,9 +840,57 @@ class QwenMlxProvider:
         return document
 
     def _preferred_tokens_for_window(self, window_run: WindowRun) -> List[Token]:
-        if window_run.core_tokens:
-            return list(window_run.core_tokens)
-        return list(window_run.tokens)
+        if not window_run.core_tokens:
+            return list(window_run.tokens)
+
+        protected_prefix = self._protected_prefix_tokens(window_run)
+        protected_suffix = self._protected_suffix_tokens(window_run)
+        return protected_prefix + list(window_run.core_tokens) + protected_suffix
+
+    def _protected_prefix_tokens(self, window_run: WindowRun) -> List[Token]:
+        if not window_run.left_overlap_tokens or not window_run.core_tokens:
+            return []
+        first_core = window_run.core_tokens[0]
+        prefix: List[Token] = []
+        for token in reversed(window_run.left_overlap_tokens):
+            if first_core.start_time - token.end_time > 0.35:
+                break
+            if self._timing_source_for_token(window_run, token) != "estimated":
+                break
+            if not self._short_edge_token(token):
+                break
+            prefix.append(token)
+        prefix.reverse()
+        return prefix
+
+    def _protected_suffix_tokens(self, window_run: WindowRun) -> List[Token]:
+        if not window_run.right_overlap_tokens or not window_run.core_tokens:
+            return []
+        last_core = window_run.core_tokens[-1]
+        suffix: List[Token] = []
+        for token in window_run.right_overlap_tokens:
+            if token.start_time - last_core.end_time > 0.35:
+                break
+            if self._timing_source_for_token(window_run, token) != "estimated":
+                break
+            if not self._short_edge_token(token):
+                break
+            suffix.append(token)
+        return suffix
+
+    def _short_edge_token(self, token: Token) -> bool:
+        text = token.text.strip()
+        if token.unit == "char":
+            return len(text) == 1
+        return 0 < len(text) <= 3
+
+    def _timing_source_for_token(
+        self, window_run: WindowRun, token: Token
+    ) -> str | None:
+        for projected in window_run.projected_tokens:
+            if self._same_token(projected.token, token):
+                return projected.timing_source
+        return None
 
     def _same_token(self, left: Token, right: Token) -> bool:
         return (

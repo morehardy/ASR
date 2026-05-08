@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from asr.models import Segment, Token
 from asr.observability.events import ObservabilityEvent
+from asr.providers.authority import ProjectedToken
 from asr.providers.quality import QualityResult, QualityThresholds
 from asr.providers.qwen_mlx import QwenMlxProvider, WindowDisplayBounds, WindowRun
 from asr.providers.windowing import AlignmentWindow
@@ -74,6 +75,52 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertFalse(run.has_timing_anchor)
         self.assertEqual(run.timing_source_counts, {})
         self.assertEqual(run.projected_tokens, [])
+
+    def test_preferred_tokens_include_short_estimated_prefix_before_core(self) -> None:
+        provider = QwenMlxProvider()
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+        prefix = Token("I", 104.98, 105.08, unit="word")
+        core = Token("have", 105.20, 105.50, unit="word")
+        run = WindowRun(
+            window=window,
+            text="I have",
+            tokens=[prefix, core],
+            left_overlap_tokens=[prefix],
+            core_tokens=[core],
+            timing_source_counts={"aligner": 1, "estimated": 1, "unresolved": 0},
+            has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(prefix, "estimated"),
+                ProjectedToken(core, "aligner", 0),
+            ],
+        )
+
+        preferred = provider._preferred_tokens_for_window(run)
+
+        self.assertEqual([token.text for token in preferred], ["I", "have"])
+
+    def test_preferred_tokens_do_not_include_aligned_context_prefix(self) -> None:
+        provider = QwenMlxProvider()
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+        prefix = Token("to", 104.98, 105.08, unit="word")
+        core = Token("have", 105.20, 105.50, unit="word")
+        run = WindowRun(
+            window=window,
+            text="to have",
+            tokens=[prefix, core],
+            left_overlap_tokens=[prefix],
+            core_tokens=[core],
+            timing_source_counts={"aligner": 2, "estimated": 0, "unresolved": 0},
+            has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(prefix, "aligner", 0),
+                ProjectedToken(core, "aligner", 1),
+            ],
+        )
+
+        preferred = provider._preferred_tokens_for_window(run)
+
+        self.assertEqual([token.text for token in preferred], ["have"])
 
     def _build_provider_with_models(
         self,
