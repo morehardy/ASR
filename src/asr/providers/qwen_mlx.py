@@ -1006,6 +1006,8 @@ class QwenMlxProvider:
             "context_start": window_run.window.context_start,
             "context_end": window_run.window.context_end,
             "token_count": len(window_run.tokens),
+            "timing_source_counts": dict(window_run.timing_source_counts),
+            "has_timing_anchor": window_run.has_timing_anchor,
         }
         if window_run.window.super_chunk_index is not None:
             diagnostic["super_chunk_index"] = window_run.window.super_chunk_index
@@ -1039,6 +1041,13 @@ class QwenMlxProvider:
                 else 1.0
             ),
         }
+        if window_run.quality is not None:
+            diagnostic["quality"]["estimated_token_ratio"] = (
+                window_run.quality.estimated_token_ratio
+            )
+            diagnostic["quality"]["unresolved_token_ratio"] = (
+                window_run.quality.unresolved_token_ratio
+            )
         return diagnostic
 
     def _fallback_segments_from_windows(self, window_runs: List[WindowRun]) -> List[Segment]:

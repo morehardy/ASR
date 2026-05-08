@@ -177,12 +177,14 @@ def _repair_middle_tokens(
 ) -> None:
     count = end_index - start_index
     available_start = previous_anchor.end_time + _ESTIMATED_TOKEN_GAP_SEC
-    available_end = next_anchor.start_time
-    available = max(0.0, available_end - available_start)
+    available_end = next_anchor.start_time - _ESTIMATED_TOKEN_GAP_SEC
+    available = available_end - available_start
     if count <= 0:
         return
+    if available <= 0.0:
+        return
 
-    slot = available / count if available > 0.0 else 0.0
+    slot = available / count
     cursor = available_start
     for index in range(start_index, end_index):
         requested = _estimated_token_duration(

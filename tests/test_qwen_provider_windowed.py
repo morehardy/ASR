@@ -93,6 +93,39 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(run.timing_source_counts, {})
         self.assertEqual(run.projected_tokens, [])
 
+    def test_window_diagnostic_includes_timing_source_quality_fields(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(2, 10.0, 20.0, 9.0, 21.0),
+            text="hello world",
+            tokens=[
+                Token("hello", 10.0, 10.4, unit="word"),
+                Token("world", 10.5, 10.9, unit="word"),
+            ],
+            quality=QualityResult(
+                False,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                estimated_token_ratio=0.25,
+                unresolved_token_ratio=0.50,
+            ),
+            timing_source_counts={"aligner": 1, "estimated": 1, "unresolved": 2},
+            has_timing_anchor=True,
+        )
+
+        diagnostic = provider._build_window_diagnostic(run)
+
+        self.assertEqual(
+            diagnostic["timing_source_counts"],
+            {"aligner": 1, "estimated": 1, "unresolved": 2},
+        )
+        self.assertIsNot(diagnostic["timing_source_counts"], run.timing_source_counts)
+        self.assertTrue(diagnostic["has_timing_anchor"])
+        self.assertEqual(diagnostic["quality"]["estimated_token_ratio"], 0.25)
+        self.assertEqual(diagnostic["quality"]["unresolved_token_ratio"], 0.50)
+
     def test_fully_unresolved_window_uses_fallback_not_token_segmentation(self) -> None:
         provider, _, _ = self._build_provider_with_models(
             asr_responses=[FakeChunk("C++ C#", language="en")],

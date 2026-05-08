@@ -138,6 +138,21 @@ class AuthorityTest(unittest.TestCase):
         self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time + 0.02)
         self.assertLessEqual(repaired[1].token.end_time, repaired[2].token.start_time)
 
+    def test_unmatched_middle_token_remains_unresolved_when_anchors_overlap(self) -> None:
+        transcript_tokens = build_transcript_tokens("a x b", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [
+                Token("a", 1.0, 2.0, unit="token"),
+                Token("b", 1.5, 1.8, unit="token"),
+            ],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=3.0)
+
+        self.assertEqual([item.timing_source for item in repaired], ["aligner", "unresolved", "aligner"])
+        self.assertEqual((repaired[1].token.start_time, repaired[1].token.end_time), (0.0, 0.0))
+
     def test_unmatched_trailing_token_is_estimated_after_last_match(self) -> None:
         transcript_tokens = build_transcript_tokens("hello there", language="en")
         projected = project_timing_onto_transcript_detailed(
