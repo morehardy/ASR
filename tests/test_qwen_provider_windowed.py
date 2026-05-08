@@ -209,6 +209,33 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertFalse(provider._needs_text_fallback(run))
         self.assertEqual(provider._unresolved_fallback_segments_from_windows([run]), [])
 
+    def test_leading_unresolved_core_token_uses_next_core_token_as_anchor(self) -> None:
+        provider = QwenMlxProvider()
+        context = Token("before", 9.4, 9.8, unit="word")
+        unresolved = Token("I", 0.0, 0.0, unit="word")
+        core = Token("have", 10.4, 10.8, unit="word")
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 5.0, 25.0),
+            text="before I have",
+            language="en",
+            tokens=[context, core],
+            left_overlap_tokens=[context],
+            core_tokens=[core],
+            projected_tokens=[
+                ProjectedToken(context, "aligner", aligner_index=0, transcript_index=0),
+                ProjectedToken(unresolved, "unresolved", transcript_index=1),
+                ProjectedToken(core, "aligner", aligner_index=1, transcript_index=2),
+            ],
+            timing_source_counts={"aligner": 2, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        segments = provider._unresolved_fallback_segments_from_windows([run])
+
+        self.assertEqual([segment.text for segment in segments], ["I"])
+        self.assertGreaterEqual(segments[0].start_time, run.window.core_start)
+        self.assertLessEqual(segments[0].end_time, core.start_time)
+
     def test_fallback_segment_does_not_last_until_window_core_end(self) -> None:
         provider = QwenMlxProvider()
         run = WindowRun(

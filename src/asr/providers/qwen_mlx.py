@@ -1185,12 +1185,6 @@ class QwenMlxProvider:
             start_index=group_start - 1,
             step=-1,
         )
-        if previous is None or not token_overlaps_core(
-            previous.token,
-            core_start=window_run.window.core_start,
-            core_end=window_run.window.core_end,
-        ):
-            return None
 
         next_projected = self._nearest_timed_projected_token(
             projected_tokens,
@@ -1205,11 +1199,31 @@ class QwenMlxProvider:
             text,
             window_run.language,
         )
-        start_time = previous.token.end_time
-        if next_projected is not None:
-            end_time = min(next_projected.token.start_time, start_time + duration)
+        previous_overlaps_core = previous is not None and token_overlaps_core(
+            previous.token,
+            core_start=window_run.window.core_start,
+            core_end=window_run.window.core_end,
+        )
+        next_overlaps_core = next_projected is not None and token_overlaps_core(
+            next_projected.token,
+            core_start=window_run.window.core_start,
+            core_end=window_run.window.core_end,
+        )
+
+        if previous_overlaps_core:
+            start_time = previous.token.end_time
+            if next_projected is not None:
+                end_time = min(next_projected.token.start_time, start_time + duration)
+            else:
+                end_time = start_time + duration
+        elif next_overlaps_core and self._group_is_transcript_adjacent_to_next(
+            group,
+            next_projected,
+        ):
+            end_time = next_projected.token.start_time
+            start_time = end_time - duration
         else:
-            end_time = start_time + duration
+            return None
 
         start_time = max(start_time, window_run.window.core_start)
         end_time = min(end_time, window_run.window.core_end)
@@ -1242,6 +1256,19 @@ class QwenMlxProvider:
                 return projected
             index += step
         return None
+
+    def _group_is_transcript_adjacent_to_next(
+        self,
+        group: List[ProjectedToken],
+        next_projected: ProjectedToken,
+    ) -> bool:
+        if not group:
+            return False
+        group_index = group[-1].transcript_index
+        next_index = next_projected.transcript_index
+        if group_index is None or next_index is None:
+            return True
+        return group_index + 1 == next_index
 
     def _estimate_local_fallback_text_duration(
         self,
