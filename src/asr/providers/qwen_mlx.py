@@ -180,6 +180,11 @@ class QwenMlxProvider:
                 segments = self._stabilize_segment_boundaries(
                     segments,
                     total_duration_sec=total_duration_sec,
+                    display_bounds=[
+                        run.display_bounds
+                        for run in window_runs
+                        if run.display_bounds is not None
+                    ],
                 )
 
             return self._build_document(
@@ -1088,7 +1093,9 @@ class QwenMlxProvider:
         segments: List[Segment],
         *,
         total_duration_sec: float,
+        display_bounds: Iterable[WindowDisplayBounds] | None = None,
         tail_padding_sec: float = 0.12,
+        target_max_segment_duration_sec: float = 8.0,
     ) -> List[Segment]:
         if not segments:
             return []
@@ -1133,7 +1140,42 @@ class QwenMlxProvider:
                     stabilized[index].end_time,
                 )
 
+        bounds = list(display_bounds or [])
+        for segment in stabilized:
+            bound = self._nearest_display_bound(segment, bounds)
+            if bound is None:
+                continue
+            segment.start_time = max(segment.start_time, bound.start_time)
+            segment.end_time = min(segment.end_time, bound.end_time)
+            segment.end_time = max(segment.start_time, segment.end_time)
+
+        for index in range(len(stabilized) - 1):
+            if stabilized[index].end_time > stabilized[index + 1].start_time:
+                stabilized[index].end_time = stabilized[index + 1].start_time
+                stabilized[index].end_time = max(
+                    stabilized[index].start_time,
+                    stabilized[index].end_time,
+                )
+
         return stabilized
+
+    def _nearest_display_bound(
+        self,
+        segment: Segment,
+        bounds: List[WindowDisplayBounds],
+    ) -> WindowDisplayBounds | None:
+        overlapping = [
+            bound
+            for bound in bounds
+            if segment.end_time >= bound.start_time
+            and segment.start_time <= bound.end_time
+        ]
+        if not overlapping:
+            return None
+        return min(
+            overlapping,
+            key=lambda bound: abs(segment.start_time - bound.start_time),
+        )
 
     def _item_to_token(self, item: Any, language: Optional[str]) -> Token:
         text = str(getattr(item, "text", "")).strip()

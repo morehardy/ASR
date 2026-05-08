@@ -787,6 +787,35 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertGreater(stabilized[2].end_time, 2.1)
         self.assertLessEqual(stabilized[2].end_time, 2.2)
 
+    def test_vad_display_bounds_clamp_segment_tail(self) -> None:
+        provider = QwenMlxProvider()
+        segments = [
+            Segment(
+                id="seg-1",
+                text="hello",
+                start_time=104.0,
+                end_time=123.0,
+                language="en",
+                tokens=[],
+            )
+        ]
+        bounds = [
+            WindowDisplayBounds(
+                start_time=104.8,
+                end_time=120.35,
+                super_chunk_index=0,
+            )
+        ]
+
+        stabilized = provider._stabilize_segment_boundaries(
+            segments,
+            total_duration_sec=200.0,
+            display_bounds=bounds,
+        )
+
+        self.assertEqual(stabilized[0].start_time, 104.8)
+        self.assertEqual(stabilized[0].end_time, 120.35)
+
 
 class QwenProviderObservabilityTest(unittest.TestCase):
     def test_provider_emits_window_and_merge_steps(self) -> None:
