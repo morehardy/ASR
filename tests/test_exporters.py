@@ -95,7 +95,10 @@ class ExporterTest(unittest.TestCase):
 
         payload = json.loads(render_json(document, granularity="token"))
 
-        self.assertNotIn("timing_source", payload["segments"][0]["tokens"][0])
+        for token_payload in payload["segments"][0]["tokens"]:
+            self.assertNotIn("timing_source", token_payload)
+        for item_payload in payload["items"]:
+            self.assertNotIn("timing_source", item_payload)
         self.assertEqual(
             payload["source_media"]["provider_metadata"]["window_diagnostics"][0]["timing_source_counts"]["estimated"],
             1,
