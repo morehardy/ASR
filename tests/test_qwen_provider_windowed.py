@@ -114,6 +114,24 @@ class QwenProviderWindowedTest(unittest.TestCase):
             config=DEFAULT_VAD_CONFIG,
         )
 
+    def test_provider_repairs_unmatched_prefix_before_split(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[FakeChunk("we have", language="en")],
+            align_responses=[
+                [FakeChunk("have", start_time=5.00, end_time=5.30)],
+            ],
+        )
+        provider._asr_model = asr_model
+        provider._aligner_model = align_model
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+
+        run = provider._transcribe_window(Path("demo.wav"), window)
+
+        self.assertEqual([token.text for token in run.left_overlap_tokens], ["we"])
+        self.assertEqual([token.text for token in run.core_tokens], ["have"])
+        self.assertGreater(run.left_overlap_tokens[0].start_time, 104.7)
+        self.assertLess(run.left_overlap_tokens[0].start_time, 105.0)
+
     def test_provider_processes_all_windows_not_first_window_only(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[

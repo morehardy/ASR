@@ -16,7 +16,6 @@ from asr.observability.timing import observe_step
 from asr.providers.authority import (
     ProjectedToken,
     build_transcript_tokens,
-    project_timing_onto_transcript,
     project_timing_onto_transcript_detailed,
     repair_unmatched_timings,
 )
@@ -290,11 +289,26 @@ class QwenMlxProvider:
             if getattr(item, "text", "").strip()
         ]
         transcript_tokens = self._build_authoritative_tokens(text, language)
-        projected_tokens = project_timing_onto_transcript(
-            transcript_tokens,
-            aligner_tokens,
+        repaired_projected_tokens = repair_unmatched_timings(
+            project_timing_onto_transcript_detailed(
+                transcript_tokens,
+                aligner_tokens,
+            ),
+            clip_duration_sec=max(0.0, window.context_end - window.context_start),
         )
-        global_tokens = self._offset_tokens(projected_tokens, window.context_start)
+        timing_source_counts = self._timing_source_counts(repaired_projected_tokens)
+        has_timing_anchor = timing_source_counts.get("aligner", 0) > 0
+        global_projected_tokens = self._offset_projected_tokens(
+            repaired_projected_tokens,
+            window.context_start,
+        )
+
+        usable_projected_tokens = (
+            self._usable_projected_tokens(global_projected_tokens)
+            if has_timing_anchor
+            else []
+        )
+        global_tokens = [projected.token for projected in usable_projected_tokens]
 
         left_overlap_tokens, core_tokens, right_overlap_tokens = (
             self._split_window_tokens(global_tokens, window)
@@ -310,6 +324,9 @@ class QwenMlxProvider:
             left_overlap_tokens=left_overlap_tokens,
             right_overlap_tokens=right_overlap_tokens,
             core_text=core_text,
+            projected_tokens=global_projected_tokens,
+            timing_source_counts=timing_source_counts,
+            has_timing_anchor=has_timing_anchor,
         )
 
     def _execute_window(
@@ -354,6 +371,8 @@ class QwenMlxProvider:
                 core_text=window_run.core_text or window_run.text,
                 context_text=window_run.text,
                 thresholds=self.quality_thresholds,
+                timing_source_counts=window_run.timing_source_counts,
+                has_timing_anchor=window_run.has_timing_anchor,
             )
 
     def _quality_boundary_inputs(
@@ -583,6 +602,45 @@ class QwenMlxProvider:
                 language=token.language,
             )
             for token in tokens
+        ]
+
+    def _timing_source_counts(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+    ) -> dict[str, int]:
+        counts = {"aligner": 0, "estimated": 0, "unresolved": 0}
+        for projected in projected_tokens:
+            counts[projected.timing_source] = counts.get(projected.timing_source, 0) + 1
+        return counts
+
+    def _offset_projected_tokens(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+        offset_sec: float,
+    ) -> List[ProjectedToken]:
+        return [
+            ProjectedToken(
+                Token(
+                    text=projected.token.text,
+                    start_time=projected.token.start_time + offset_sec,
+                    end_time=projected.token.end_time + offset_sec,
+                    unit=projected.token.unit,
+                    language=projected.token.language,
+                ),
+                projected.timing_source,
+                projected.aligner_index,
+            )
+            for projected in projected_tokens
+        ]
+
+    def _usable_projected_tokens(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+    ) -> List[ProjectedToken]:
+        return [
+            projected
+            for projected in projected_tokens
+            if projected.timing_source in {"aligner", "estimated"}
         ]
 
     def _split_window_tokens(
