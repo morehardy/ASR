@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 import re
 from difflib import SequenceMatcher
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from asr.models import Token
+
+TimingSource = Literal["aligner", "estimated", "unresolved"]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectedToken:
+    token: Token
+    timing_source: TimingSource
+    aligner_index: int | None = None
 
 
 def build_transcript_tokens(text: str, language: Optional[str]) -> List[Token]:
@@ -35,29 +46,45 @@ def build_transcript_tokens(text: str, language: Optional[str]) -> List[Token]:
 def project_timing_onto_transcript(
     transcript_tokens: List[Token], aligner_tokens: List[Token]
 ) -> List[Token]:
-    projected: List[Token] = []
+    return [
+        projected.token
+        for projected in project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            aligner_tokens,
+        )
+    ]
+
+
+def project_timing_onto_transcript_detailed(
+    transcript_tokens: List[Token], aligner_tokens: List[Token]
+) -> List[ProjectedToken]:
+    projected: List[ProjectedToken] = []
     aligner_index = 0
 
     for transcript_token in transcript_tokens:
         match_index = _find_forward_match(transcript_token.text, aligner_tokens, aligner_index)
         if match_index is None:
-            projected.append(_clone_token(transcript_token))
+            projected.append(ProjectedToken(_clone_token(transcript_token), "unresolved", None))
             continue
 
         aligner_token = aligner_tokens[match_index]
         aligner_index = match_index + 1
 
-        if aligner_token.end_time < aligner_token.start_time:
-            projected.append(_clone_token(transcript_token))
+        if not _valid_token_timing(aligner_token):
+            projected.append(ProjectedToken(_clone_token(transcript_token), "unresolved", None))
             continue
 
         projected.append(
-            Token(
-                text=transcript_token.text,
-                start_time=aligner_token.start_time,
-                end_time=aligner_token.end_time,
-                unit=transcript_token.unit,
-                language=transcript_token.language,
+            ProjectedToken(
+                Token(
+                    text=transcript_token.text,
+                    start_time=aligner_token.start_time,
+                    end_time=aligner_token.end_time,
+                    unit=transcript_token.unit,
+                    language=transcript_token.language,
+                ),
+                "aligner",
+                match_index,
             )
         )
 
@@ -101,6 +128,14 @@ def _clone_token(token: Token) -> Token:
         end_time=token.end_time,
         unit=token.unit,
         language=token.language,
+    )
+
+
+def _valid_token_timing(token: Token) -> bool:
+    return (
+        math.isfinite(token.start_time)
+        and math.isfinite(token.end_time)
+        and token.end_time >= token.start_time
     )
 
 

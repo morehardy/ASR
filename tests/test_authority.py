@@ -2,8 +2,10 @@ import unittest
 
 from asr.models import Token
 from asr.providers.authority import (
+    ProjectedToken,
     build_transcript_tokens,
     project_timing_onto_transcript,
+    project_timing_onto_transcript_detailed,
 )
 
 
@@ -73,3 +75,33 @@ class AuthorityTest(unittest.TestCase):
         self.assertEqual(projected[0].end_time, 0.0)
         self.assertEqual(projected[1].start_time, 0.0)
         self.assertEqual(projected[1].end_time, 0.0)
+
+    def test_detailed_projection_marks_unmatched_tokens_unresolved(self) -> None:
+        transcript_tokens = build_transcript_tokens("I have", language="en")
+        aligner_tokens = [
+            Token("have", 5.20, 5.50, unit="token"),
+        ]
+
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            aligner_tokens,
+        )
+
+        self.assertIsInstance(projected[0], ProjectedToken)
+        self.assertEqual([item.token.text for item in projected], ["I", "have"])
+        self.assertEqual([item.timing_source for item in projected], ["unresolved", "aligner"])
+        self.assertIsNone(projected[0].aligner_index)
+        self.assertEqual(projected[1].aligner_index, 0)
+        self.assertEqual((projected[1].token.start_time, projected[1].token.end_time), (5.20, 5.50))
+
+    def test_existing_projection_wrapper_preserves_public_token_return_type(self) -> None:
+        transcript_tokens = build_transcript_tokens("hello", language="en")
+        aligner_tokens = [Token("hello", 1.0, 1.2, unit="token")]
+
+        projected = project_timing_onto_transcript(transcript_tokens, aligner_tokens)
+
+        self.assertIsInstance(projected[0], Token)
+        self.assertEqual(
+            [(token.text, token.start_time, token.end_time) for token in projected],
+            [("hello", 1.0, 1.2)],
+        )
