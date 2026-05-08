@@ -15,6 +15,8 @@ class QualityThresholds:
     zero_or_flat_timestamp_ratio_max: float = 0.05
     boundary_disagreement_score_max: float = 0.20
     core_context_text_divergence_max: float = 0.15
+    estimated_token_ratio_max: float = 0.30
+    unresolved_token_ratio_max: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +26,8 @@ class QualityResult:
     zero_or_flat_timestamp_ratio: float
     boundary_disagreement_score: float
     core_context_text_divergence: float
+    estimated_token_ratio: float = 0.0
+    unresolved_token_ratio: float = 0.0
 
 
 def evaluate_quality(
@@ -33,9 +37,16 @@ def evaluate_quality(
     core_text: str,
     context_text: str,
     thresholds: QualityThresholds,
+    timing_source_counts: dict[str, int] | None = None,
+    has_timing_anchor: bool = True,
 ) -> QualityResult:
     if not tokens:
         return QualityResult(False, 0.0, 1.0, 1.0, 1.0)
+
+    timing_source_counts = timing_source_counts or {}
+    timing_total = max(1, sum(timing_source_counts.values()))
+    estimated_token_ratio = timing_source_counts.get("estimated", 0) / timing_total
+    unresolved_token_ratio = timing_source_counts.get("unresolved", 0) / timing_total
 
     monotonic_timestamp_ratio = _monotonic_timestamp_ratio(tokens)
     zero_or_flat_timestamp_ratio = _zero_or_flat_timestamp_ratio(tokens)
@@ -51,10 +62,13 @@ def evaluate_quality(
     ).ratio()
 
     passed = (
-        monotonic_timestamp_ratio >= thresholds.monotonic_timestamp_ratio_min
+        has_timing_anchor
+        and monotonic_timestamp_ratio >= thresholds.monotonic_timestamp_ratio_min
         and zero_or_flat_timestamp_ratio <= thresholds.zero_or_flat_timestamp_ratio_max
         and boundary_disagreement_score <= thresholds.boundary_disagreement_score_max
         and core_context_text_divergence <= thresholds.core_context_text_divergence_max
+        and estimated_token_ratio <= thresholds.estimated_token_ratio_max
+        and unresolved_token_ratio <= thresholds.unresolved_token_ratio_max
     )
 
     return QualityResult(
@@ -63,6 +77,8 @@ def evaluate_quality(
         zero_or_flat_timestamp_ratio=zero_or_flat_timestamp_ratio,
         boundary_disagreement_score=boundary_disagreement_score,
         core_context_text_divergence=core_context_text_divergence,
+        estimated_token_ratio=estimated_token_ratio,
+        unresolved_token_ratio=unresolved_token_ratio,
     )
 
 

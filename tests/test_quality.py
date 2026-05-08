@@ -105,3 +105,44 @@ class QualityGateTest(unittest.TestCase):
 
         self.assertTrue(passing_result.passed)
         self.assertFalse(failing_result.passed)
+
+    def test_unresolved_tokens_cannot_pass_quality(self) -> None:
+        tokens = [
+            Token(text="hello", start_time=1.0, end_time=1.2, unit="token"),
+            Token(text="world", start_time=1.3, end_time=1.5, unit="token"),
+        ]
+
+        result = evaluate_quality(
+            tokens=tokens,
+            left_overlap_tokens=tokens,
+            right_overlap_tokens=tokens,
+            core_text="hello world",
+            context_text="hello world",
+            thresholds=QualityThresholds(),
+            timing_source_counts={"aligner": 1, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        self.assertFalse(result.passed)
+        self.assertAlmostEqual(result.unresolved_token_ratio, 0.5)
+
+    def test_high_estimated_ratio_downgrades_merge_confidence(self) -> None:
+        tokens = [
+            Token(text="I", start_time=1.0, end_time=1.1, unit="token"),
+            Token(text="have", start_time=1.2, end_time=1.5, unit="token"),
+            Token(text="one", start_time=1.6, end_time=1.8, unit="token"),
+        ]
+
+        result = evaluate_quality(
+            tokens=tokens,
+            left_overlap_tokens=tokens,
+            right_overlap_tokens=tokens,
+            core_text="I have one",
+            context_text="I have one",
+            thresholds=QualityThresholds(),
+            timing_source_counts={"aligner": 2, "estimated": 1, "unresolved": 0},
+            has_timing_anchor=True,
+        )
+
+        self.assertFalse(result.passed)
+        self.assertGreater(result.estimated_token_ratio, 0.30)

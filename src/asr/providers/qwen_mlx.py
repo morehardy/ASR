@@ -14,18 +14,31 @@ from asr.models import Segment, Token, TranscriptionDocument
 from asr.observability.observer import Observer
 from asr.observability.timing import observe_step
 from asr.providers.authority import (
+    ProjectedToken,
     build_transcript_tokens,
-    project_timing_onto_transcript,
+    project_timing_onto_transcript_detailed,
+    repair_unmatched_timings,
 )
 from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
-from asr.providers.window_merge import WindowSpan, merge_adjacent_windows
+from asr.providers.window_merge import (
+    WindowSpan,
+    merge_adjacent_windows,
+    token_overlaps_core,
+)
 from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
 from asr.vad import SpeechPlan
 
 
 DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
 DEFAULT_ALIGNER_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
+
+
+@dataclass(frozen=True, slots=True)
+class WindowDisplayBounds:
+    start_time: float
+    end_time: float
+    super_chunk_index: int
 
 
 @dataclass(slots=True)
@@ -40,6 +53,10 @@ class WindowRun:
     core_text: str = ""
     quality: Optional[QualityResult] = None
     error: Optional[str] = None
+    projected_tokens: List[ProjectedToken] = field(default_factory=list)
+    timing_source_counts: dict[str, int] = field(default_factory=dict)
+    has_timing_anchor: bool = False
+    display_bounds: WindowDisplayBounds | None = None
 
 
 @dataclass
@@ -51,6 +68,8 @@ class QwenMlxProvider:
     name: str = "qwen-mlx"
     window_config: WindowBudgetConfig = field(default_factory=WindowBudgetConfig)
     quality_thresholds: QualityThresholds = field(default_factory=QualityThresholds)
+    vad_display_lead_pad_sec: float = 0.20
+    vad_display_tail_pad_sec: float = 0.35
 
     def __post_init__(self) -> None:
         self._asr_model: Optional[Any] = None
@@ -128,6 +147,11 @@ class QwenMlxProvider:
                         window,
                         window_index=index,
                         window_count=len(windows),
+                        display_bounds=self._display_bounds_for_window(
+                            window,
+                            speech_plan=speech_plan,
+                            total_duration_sec=total_duration_sec,
+                        ),
                     )
                 )
             self._evaluate_window_qualities(window_runs)
@@ -142,11 +166,25 @@ class QwenMlxProvider:
             ):
                 merged_tokens = self._merge_window_runs(window_runs)
                 segments = self._tokens_to_segments(merged_tokens)
+                fallback_segments = self._fallback_segments_from_windows(
+                    [
+                        run
+                        for run in window_runs
+                        if self._needs_text_fallback(run)
+                    ]
+                )
+                if fallback_segments:
+                    segments = self._append_segments(segments, fallback_segments)
                 if not segments:
                     segments = self._fallback_segments_from_windows(window_runs)
                 segments = self._stabilize_segment_boundaries(
                     segments,
                     total_duration_sec=total_duration_sec,
+                    display_bounds=[
+                        run.display_bounds
+                        for run in window_runs
+                        if run.display_bounds is not None
+                    ],
                 )
 
             return self._build_document(
@@ -253,7 +291,44 @@ class QwenMlxProvider:
             return 0
         return len(speech_plan.super_chunks)
 
-    def _transcribe_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
+    def _display_bounds_for_window(
+        self,
+        window: AlignmentWindow,
+        *,
+        speech_plan: SpeechPlan | None,
+        total_duration_sec: float,
+    ) -> WindowDisplayBounds | None:
+        if not self._uses_speech_plan(speech_plan):
+            return None
+        if window.super_chunk_index is None:
+            return None
+        assert speech_plan is not None
+        chunk = next(
+            (
+                candidate
+                for candidate in speech_plan.super_chunks
+                if candidate.index == window.super_chunk_index
+            ),
+            None,
+        )
+        if chunk is None:
+            return None
+        return WindowDisplayBounds(
+            start_time=max(0.0, chunk.speech_start - self.vad_display_lead_pad_sec),
+            end_time=min(
+                total_duration_sec,
+                chunk.speech_end + self.vad_display_tail_pad_sec,
+            ),
+            super_chunk_index=chunk.index,
+        )
+
+    def _transcribe_window(
+        self,
+        audio_path: Path,
+        window: AlignmentWindow,
+        *,
+        display_bounds: WindowDisplayBounds | None = None,
+    ) -> WindowRun:
         context_input = self._context_input_path(audio_path, window)
         context_kwargs = self._context_generate_kwargs(window)
         transcription = self._asr_model.generate(context_input, **context_kwargs)
@@ -272,11 +347,26 @@ class QwenMlxProvider:
             if getattr(item, "text", "").strip()
         ]
         transcript_tokens = self._build_authoritative_tokens(text, language)
-        projected_tokens = project_timing_onto_transcript(
-            transcript_tokens,
-            aligner_tokens,
+        repaired_projected_tokens = repair_unmatched_timings(
+            project_timing_onto_transcript_detailed(
+                transcript_tokens,
+                aligner_tokens,
+            ),
+            clip_duration_sec=max(0.0, window.context_end - window.context_start),
         )
-        global_tokens = self._offset_tokens(projected_tokens, window.context_start)
+        timing_source_counts = self._timing_source_counts(repaired_projected_tokens)
+        has_timing_anchor = timing_source_counts.get("aligner", 0) > 0
+        global_projected_tokens = self._offset_projected_tokens(
+            repaired_projected_tokens,
+            window.context_start,
+        )
+
+        usable_projected_tokens = (
+            self._usable_projected_tokens(global_projected_tokens)
+            if has_timing_anchor
+            else []
+        )
+        global_tokens = [projected.token for projected in usable_projected_tokens]
 
         left_overlap_tokens, core_tokens, right_overlap_tokens = (
             self._split_window_tokens(global_tokens, window)
@@ -292,6 +382,10 @@ class QwenMlxProvider:
             left_overlap_tokens=left_overlap_tokens,
             right_overlap_tokens=right_overlap_tokens,
             core_text=core_text,
+            projected_tokens=global_projected_tokens,
+            timing_source_counts=timing_source_counts,
+            has_timing_anchor=has_timing_anchor,
+            display_bounds=display_bounds,
         )
 
     def _execute_window(
@@ -301,6 +395,7 @@ class QwenMlxProvider:
         *,
         window_index: int,
         window_count: int,
+        display_bounds: WindowDisplayBounds | None = None,
     ) -> WindowRun:
         meta = {"window_index": window_index, "window_count": window_count}
         if window.super_chunk_index is not None:
@@ -314,11 +409,16 @@ class QwenMlxProvider:
                 step="provider_window",
                 meta=meta,
             ):
-                return self._transcribe_window(audio_path, window)
+                return self._transcribe_window(
+                    audio_path,
+                    window,
+                    display_bounds=display_bounds,
+                )
         except Exception as exc:
             return WindowRun(
                 window=window,
                 error=str(exc),
+                display_bounds=display_bounds,
             )
 
     def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
@@ -336,6 +436,8 @@ class QwenMlxProvider:
                 core_text=window_run.core_text or window_run.text,
                 context_text=window_run.text,
                 thresholds=self.quality_thresholds,
+                timing_source_counts=window_run.timing_source_counts,
+                has_timing_anchor=window_run.has_timing_anchor,
             )
 
     def _quality_boundary_inputs(
@@ -567,6 +669,45 @@ class QwenMlxProvider:
             for token in tokens
         ]
 
+    def _timing_source_counts(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+    ) -> dict[str, int]:
+        counts = {"aligner": 0, "estimated": 0, "unresolved": 0}
+        for projected in projected_tokens:
+            counts[projected.timing_source] = counts.get(projected.timing_source, 0) + 1
+        return counts
+
+    def _offset_projected_tokens(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+        offset_sec: float,
+    ) -> List[ProjectedToken]:
+        return [
+            ProjectedToken(
+                Token(
+                    text=projected.token.text,
+                    start_time=projected.token.start_time + offset_sec,
+                    end_time=projected.token.end_time + offset_sec,
+                    unit=projected.token.unit,
+                    language=projected.token.language,
+                ),
+                projected.timing_source,
+                projected.aligner_index,
+            )
+            for projected in projected_tokens
+        ]
+
+    def _usable_projected_tokens(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+    ) -> List[ProjectedToken]:
+        return [
+            projected
+            for projected in projected_tokens
+            if projected.timing_source in {"aligner", "estimated"}
+        ]
+
     def _split_window_tokens(
         self,
         tokens: Iterable[Token],
@@ -577,10 +718,14 @@ class QwenMlxProvider:
         right_overlap: List[Token] = []
 
         for token in tokens:
-            if token.start_time < window.core_start:
-                left_overlap.append(token)
-            elif token.start_time < window.core_end:
+            if token_overlaps_core(
+                token,
+                core_start=window.core_start,
+                core_end=window.core_end,
+            ):
                 core_tokens.append(token)
+            elif token.start_time < window.core_start:
+                left_overlap.append(token)
             else:
                 right_overlap.append(token)
 
@@ -592,6 +737,15 @@ class QwenMlxProvider:
 
         for window_run in window_runs:
             if window_run.error is not None:
+                merged_tokens = self._append_tokens(
+                    merged_tokens,
+                    self._merge_passing_block(passing_block),
+                    enforce_monotonic=True,
+                )
+                passing_block = []
+                continue
+
+            if self._needs_text_fallback(window_run):
                 merged_tokens = self._append_tokens(
                     merged_tokens,
                     self._merge_passing_block(passing_block),
@@ -673,7 +827,11 @@ class QwenMlxProvider:
             token
             for token in tokens
             if any(
-                window_run.window.core_start <= token.start_time < window_run.window.core_end
+                token_overlaps_core(
+                    token,
+                    core_start=window_run.window.core_start,
+                    core_end=window_run.window.core_end,
+                )
                 for window_run in window_runs
             )
         ]
@@ -681,6 +839,16 @@ class QwenMlxProvider:
 
     def _fallback_tokens_for_run(self, window_run: WindowRun) -> List[Token]:
         return self._preferred_tokens_for_window(window_run)
+
+    def _needs_text_fallback(self, window_run: WindowRun) -> bool:
+        return (
+            window_run.error is None
+            and bool(window_run.text.strip())
+            and (
+                window_run.timing_source_counts.get("unresolved", 0) > 0
+                or (not window_run.has_timing_anchor and not window_run.tokens)
+            )
+        )
 
     def _append_tokens(
         self,
@@ -700,6 +868,29 @@ class QwenMlxProvider:
                 token = self._coerce_monotonic_token(merged[-1], token)
             merged.append(token)
 
+        return merged
+
+    def _append_segments(
+        self, existing: List[Segment], new_segments: List[Segment]
+    ) -> List[Segment]:
+        if not new_segments:
+            return existing
+        merged = list(existing)
+        for segment in new_segments:
+            merged.append(
+                Segment(
+                    id=f"seg-{len(merged) + 1}",
+                    text=segment.text,
+                    start_time=segment.start_time,
+                    end_time=segment.end_time,
+                    language=segment.language,
+                    tokens=list(segment.tokens),
+                    speaker=segment.speaker,
+                )
+            )
+        merged.sort(key=lambda segment: (segment.start_time, segment.end_time))
+        for index, segment in enumerate(merged, start=1):
+            segment.id = f"seg-{index}"
         return merged
 
     def _coerce_monotonic_token(self, previous: Token, token: Token) -> Token:
@@ -756,9 +947,57 @@ class QwenMlxProvider:
         return document
 
     def _preferred_tokens_for_window(self, window_run: WindowRun) -> List[Token]:
-        if window_run.core_tokens:
-            return list(window_run.core_tokens)
-        return list(window_run.tokens)
+        if not window_run.core_tokens:
+            return list(window_run.tokens)
+
+        protected_prefix = self._protected_prefix_tokens(window_run)
+        protected_suffix = self._protected_suffix_tokens(window_run)
+        return protected_prefix + list(window_run.core_tokens) + protected_suffix
+
+    def _protected_prefix_tokens(self, window_run: WindowRun) -> List[Token]:
+        if not window_run.left_overlap_tokens or not window_run.core_tokens:
+            return []
+        first_core = window_run.core_tokens[0]
+        prefix: List[Token] = []
+        for token in reversed(window_run.left_overlap_tokens):
+            if first_core.start_time - token.end_time > 0.35:
+                break
+            if self._timing_source_for_token(window_run, token) != "estimated":
+                break
+            if not self._short_edge_token(token):
+                break
+            prefix.append(token)
+        prefix.reverse()
+        return prefix
+
+    def _protected_suffix_tokens(self, window_run: WindowRun) -> List[Token]:
+        if not window_run.right_overlap_tokens or not window_run.core_tokens:
+            return []
+        last_core = window_run.core_tokens[-1]
+        suffix: List[Token] = []
+        for token in window_run.right_overlap_tokens:
+            if token.start_time - last_core.end_time > 0.35:
+                break
+            if self._timing_source_for_token(window_run, token) != "estimated":
+                break
+            if not self._short_edge_token(token):
+                break
+            suffix.append(token)
+        return suffix
+
+    def _short_edge_token(self, token: Token) -> bool:
+        text = token.text.strip()
+        if token.unit == "char":
+            return len(text) == 1
+        return 0 < len(text) <= 3
+
+    def _timing_source_for_token(
+        self, window_run: WindowRun, token: Token
+    ) -> str | None:
+        for projected in window_run.projected_tokens:
+            if self._same_token(projected.token, token):
+                return projected.timing_source
+        return None
 
     def _same_token(self, left: Token, right: Token) -> bool:
         return (
@@ -786,9 +1025,14 @@ class QwenMlxProvider:
             "context_start": window_run.window.context_start,
             "context_end": window_run.window.context_end,
             "token_count": len(window_run.tokens),
+            "timing_source_counts": dict(window_run.timing_source_counts),
+            "has_timing_anchor": window_run.has_timing_anchor,
         }
         if window_run.window.super_chunk_index is not None:
             diagnostic["super_chunk_index"] = window_run.window.super_chunk_index
+        if window_run.display_bounds is not None:
+            diagnostic["display_start"] = window_run.display_bounds.start_time
+            diagnostic["display_end"] = window_run.display_bounds.end_time
         if window_run.error is not None:
             diagnostic["error"] = window_run.error
             return diagnostic
@@ -816,31 +1060,70 @@ class QwenMlxProvider:
                 else 1.0
             ),
         }
+        if window_run.quality is not None:
+            diagnostic["quality"]["estimated_token_ratio"] = (
+                window_run.quality.estimated_token_ratio
+            )
+            diagnostic["quality"]["unresolved_token_ratio"] = (
+                window_run.quality.unresolved_token_ratio
+            )
         return diagnostic
 
     def _fallback_segments_from_windows(self, window_runs: List[WindowRun]) -> List[Segment]:
         segments: List[Segment] = []
         for window_run in window_runs:
-            if not window_run.text:
+            if window_run.error is not None or not window_run.text.strip():
                 continue
+            start_time = self._fallback_start_time(window_run)
+            end_time = self._fallback_end_time(window_run, start_time)
             segments.append(
                 Segment(
                     id=f"seg-{len(segments) + 1}",
                     text=window_run.text,
-                    start_time=window_run.window.core_start,
-                    end_time=window_run.window.core_end,
+                    start_time=start_time,
+                    end_time=end_time,
                     language=window_run.language,
                     tokens=[],
                 )
             )
         return segments
 
+    def _fallback_start_time(self, window_run: WindowRun) -> float:
+        if window_run.display_bounds is not None:
+            return max(window_run.display_bounds.start_time, window_run.window.core_start)
+        return window_run.window.core_start
+
+    def _fallback_end_time(self, window_run: WindowRun, start_time: float) -> float:
+        max_duration = 6.0
+        estimated_duration = min(
+            max_duration,
+            self._estimate_fallback_text_duration(window_run.text, window_run.language),
+        )
+        end_time = start_time + estimated_duration
+        if window_run.display_bounds is not None:
+            end_time = min(end_time, window_run.display_bounds.end_time)
+        else:
+            end_time = min(end_time, window_run.window.core_end)
+        return max(start_time, end_time)
+
+    def _estimate_fallback_text_duration(
+        self, text: str, language: Optional[str]
+    ) -> float:
+        normalized = (language or "").lower()
+        if normalized.startswith("zh") or "chinese" in normalized or self._contains_cjk(text):
+            char_count = sum(1 for char in text if not char.isspace())
+            return max(1.0, char_count * 0.12)
+        word_count = len([piece for piece in text.split() if piece])
+        return max(1.2, word_count * 0.35)
+
     def _stabilize_segment_boundaries(
         self,
         segments: List[Segment],
         *,
         total_duration_sec: float,
+        display_bounds: Iterable[WindowDisplayBounds] | None = None,
         tail_padding_sec: float = 0.12,
+        target_max_segment_duration_sec: float = 8.0,
     ) -> List[Segment]:
         if not segments:
             return []
@@ -885,7 +1168,42 @@ class QwenMlxProvider:
                     stabilized[index].end_time,
                 )
 
+        bounds = list(display_bounds or [])
+        for segment in stabilized:
+            bound = self._nearest_display_bound(segment, bounds)
+            if bound is None:
+                continue
+            segment.start_time = max(segment.start_time, bound.start_time)
+            segment.end_time = min(segment.end_time, bound.end_time)
+            segment.end_time = max(segment.start_time, segment.end_time)
+
+        for index in range(len(stabilized) - 1):
+            if stabilized[index].end_time > stabilized[index + 1].start_time:
+                stabilized[index].end_time = stabilized[index + 1].start_time
+                stabilized[index].end_time = max(
+                    stabilized[index].start_time,
+                    stabilized[index].end_time,
+                )
+
         return stabilized
+
+    def _nearest_display_bound(
+        self,
+        segment: Segment,
+        bounds: List[WindowDisplayBounds],
+    ) -> WindowDisplayBounds | None:
+        overlapping = [
+            bound
+            for bound in bounds
+            if segment.end_time >= bound.start_time
+            and segment.start_time <= bound.end_time
+        ]
+        if not overlapping:
+            return None
+        return min(
+            overlapping,
+            key=lambda bound: abs(segment.start_time - bound.start_time),
+        )
 
     def _item_to_token(self, item: Any, language: Optional[str]) -> Token:
         text = str(getattr(item, "text", "")).strip()
@@ -912,7 +1230,12 @@ class QwenMlxProvider:
         normalized = str(language).strip()
         return normalized or None
 
-    def _tokens_to_segments(self, tokens: Iterable[Token]) -> List[Segment]:
+    def _tokens_to_segments(
+        self,
+        tokens: Iterable[Token],
+        *,
+        target_max_segment_duration_sec: float = 8.0,
+    ) -> List[Segment]:
         segments: List[Segment] = []
         current_tokens: List[Token] = []
         previous_end: Optional[float] = None
@@ -923,6 +1246,12 @@ class QwenMlxProvider:
                 if previous_end is not None and token.start_time - previous_end >= 1.0:
                     should_break = True
                 if self._ends_segment(current_tokens[-1].text):
+                    should_break = True
+                if (
+                    current_tokens
+                    and token.end_time - current_tokens[0].start_time
+                    > target_max_segment_duration_sec
+                ):
                     should_break = True
             if should_break:
                 segments.append(self._build_segment(len(segments) + 1, current_tokens))

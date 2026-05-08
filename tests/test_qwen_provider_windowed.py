@@ -5,8 +5,9 @@ from unittest.mock import patch
 
 from asr.models import Segment, Token
 from asr.observability.events import ObservabilityEvent
+from asr.providers.authority import ProjectedToken
 from asr.providers.quality import QualityResult, QualityThresholds
-from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
+from asr.providers.qwen_mlx import QwenMlxProvider, WindowDisplayBounds, WindowRun
 from asr.providers.windowing import AlignmentWindow
 from asr.vad import DEFAULT_VAD_CONFIG, SpeechPlan, SpeechSpan, SuperChunk
 
@@ -52,6 +53,216 @@ class _ProviderRecordingObserver:
 
 
 class QwenProviderWindowedTest(unittest.TestCase):
+    def test_long_token_segment_splits_at_target_duration(self) -> None:
+        provider = QwenMlxProvider()
+        tokens = [
+            Token("one", 0.0, 1.0, unit="word"),
+            Token("two", 1.1, 2.0, unit="word"),
+            Token("three", 2.1, 3.0, unit="word"),
+            Token("four", 3.1, 4.0, unit="word"),
+        ]
+
+        segments = provider._tokens_to_segments(tokens, target_max_segment_duration_sec=2.5)
+
+        self.assertEqual([segment.text for segment in segments], ["one two", "three four"])
+        self.assertEqual(
+            [(segment.start_time, segment.end_time) for segment in segments],
+            [(0.0, 2.0), (2.1, 4.0)],
+        )
+
+    def test_window_run_carries_display_bounds_without_provider_lookup_state(self) -> None:
+        bounds = WindowDisplayBounds(
+            start_time=104.8,
+            end_time=120.35,
+            super_chunk_index=0,
+        )
+        run = WindowRun(
+            window=AlignmentWindow(0, 100.0, 130.0, 100.0, 130.0, super_chunk_index=0),
+            text="hello",
+            display_bounds=bounds,
+        )
+
+        self.assertEqual(run.display_bounds, bounds)
+        self.assertFalse(hasattr(QwenMlxProvider(), "_display_bounds_by_window_index"))
+        self.assertFalse(hasattr(QwenMlxProvider(), "_window_display_bounds"))
+
+    def test_window_run_defaults_to_no_timing_anchor(self) -> None:
+        run = WindowRun(window=AlignmentWindow(0, 0.0, 1.0, 0.0, 1.0), text="hello")
+
+        self.assertFalse(run.has_timing_anchor)
+        self.assertEqual(run.timing_source_counts, {})
+        self.assertEqual(run.projected_tokens, [])
+
+    def test_window_diagnostic_includes_timing_source_quality_fields(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(2, 10.0, 20.0, 9.0, 21.0),
+            text="hello world",
+            tokens=[
+                Token("hello", 10.0, 10.4, unit="word"),
+                Token("world", 10.5, 10.9, unit="word"),
+            ],
+            quality=QualityResult(
+                False,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                estimated_token_ratio=0.25,
+                unresolved_token_ratio=0.50,
+            ),
+            timing_source_counts={"aligner": 1, "estimated": 1, "unresolved": 2},
+            has_timing_anchor=True,
+        )
+
+        diagnostic = provider._build_window_diagnostic(run)
+
+        self.assertEqual(
+            diagnostic["timing_source_counts"],
+            {"aligner": 1, "estimated": 1, "unresolved": 2},
+        )
+        self.assertIsNot(diagnostic["timing_source_counts"], run.timing_source_counts)
+        self.assertTrue(diagnostic["has_timing_anchor"])
+        self.assertEqual(diagnostic["quality"]["estimated_token_ratio"], 0.25)
+        self.assertEqual(diagnostic["quality"]["unresolved_token_ratio"], 0.50)
+
+    def test_fully_unresolved_window_uses_fallback_not_token_segmentation(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[FakeChunk("C++ C#", language="en")],
+            align_responses=[
+                [
+                    FakeChunk("C", start_time=1.00, end_time=1.10),
+                    FakeChunk("C", start_time=1.10, end_time=1.20),
+                ]
+            ],
+        )
+        provider._probe_duration_sec = lambda _: 40.0
+
+        doc = provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual([segment.text for segment in doc.segments], ["C++ C#"])
+        self.assertEqual(doc.segments[0].tokens, [])
+        self.assertLessEqual(doc.segments[0].end_time - doc.segments[0].start_time, 6.0)
+
+    def test_partially_unresolved_window_preserves_full_text_with_fallback_segment(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[FakeChunk("a x b", language="en")],
+            align_responses=[
+                [
+                    FakeChunk("a", start_time=1.0, end_time=2.0),
+                    FakeChunk("b", start_time=1.5, end_time=1.8),
+                ]
+            ],
+        )
+        provider._probe_duration_sec = lambda _: 3.0
+
+        doc = provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual([segment.text for segment in doc.segments], ["a x b"])
+        self.assertEqual(doc.segments[0].tokens, [])
+
+    def test_fallback_segment_does_not_last_until_window_core_end(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(0, 100.0, 250.0, 95.0, 255.0),
+            text="bad fallback text",
+            language="en",
+            tokens=[],
+            has_timing_anchor=False,
+        )
+
+        segments = provider._fallback_segments_from_windows([run])
+
+        self.assertEqual(len(segments), 1)
+        self.assertLessEqual(segments[0].end_time - segments[0].start_time, 6.0)
+        self.assertLess(segments[0].end_time, 250.0)
+
+    def test_vad_fallback_start_uses_window_core_with_shared_display_bounds(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(
+                1,
+                70.0,
+                90.0,
+                65.0,
+                95.0,
+                super_chunk_index=0,
+            ),
+            text="late unresolved",
+            language="en",
+            display_bounds=WindowDisplayBounds(
+                start_time=19.8,
+                end_time=120.35,
+                super_chunk_index=0,
+            ),
+            has_timing_anchor=False,
+        )
+
+        segments = provider._fallback_segments_from_windows([run])
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].start_time, 70.0)
+        self.assertLessEqual(segments[0].end_time - segments[0].start_time, 6.0)
+
+    def test_fallback_segments_skip_whitespace_only_text(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 9.0, 21.0),
+            text="  \t\n  ",
+            language="en",
+            has_timing_anchor=False,
+        )
+
+        segments = provider._fallback_segments_from_windows([run])
+
+        self.assertEqual(segments, [])
+
+    def test_preferred_tokens_include_short_estimated_prefix_before_core(self) -> None:
+        provider = QwenMlxProvider()
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+        prefix = Token("I", 104.98, 105.08, unit="word")
+        core = Token("have", 105.20, 105.50, unit="word")
+        run = WindowRun(
+            window=window,
+            text="I have",
+            tokens=[prefix, core],
+            left_overlap_tokens=[prefix],
+            core_tokens=[core],
+            timing_source_counts={"aligner": 1, "estimated": 1, "unresolved": 0},
+            has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(prefix, "estimated"),
+                ProjectedToken(core, "aligner", 0),
+            ],
+        )
+
+        preferred = provider._preferred_tokens_for_window(run)
+
+        self.assertEqual([token.text for token in preferred], ["I", "have"])
+
+    def test_preferred_tokens_do_not_include_aligned_context_prefix(self) -> None:
+        provider = QwenMlxProvider()
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+        prefix = Token("to", 104.98, 105.08, unit="word")
+        core = Token("have", 105.20, 105.50, unit="word")
+        run = WindowRun(
+            window=window,
+            text="to have",
+            tokens=[prefix, core],
+            left_overlap_tokens=[prefix],
+            core_tokens=[core],
+            timing_source_counts={"aligner": 2, "estimated": 0, "unresolved": 0},
+            has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(prefix, "aligner", 0),
+                ProjectedToken(core, "aligner", 1),
+            ],
+        )
+
+        preferred = provider._preferred_tokens_for_window(run)
+
+        self.assertEqual([token.text for token in preferred], ["have"])
+
     def _build_provider_with_models(
         self,
         *,
@@ -90,6 +301,24 @@ class QwenProviderWindowedTest(unittest.TestCase):
             super_chunks=chunks,
             config=DEFAULT_VAD_CONFIG,
         )
+
+    def test_provider_repairs_unmatched_prefix_before_split(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[FakeChunk("we have", language="en")],
+            align_responses=[
+                [FakeChunk("have", start_time=5.00, end_time=5.30)],
+            ],
+        )
+        provider._asr_model = asr_model
+        provider._aligner_model = align_model
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+
+        run = provider._transcribe_window(Path("demo.wav"), window)
+
+        self.assertEqual([token.text for token in run.left_overlap_tokens], ["we"])
+        self.assertEqual([token.text for token in run.core_tokens], ["have"])
+        self.assertGreater(run.left_overlap_tokens[0].start_time, 104.7)
+        self.assertLess(run.left_overlap_tokens[0].start_time, 105.0)
 
     def test_provider_processes_all_windows_not_first_window_only(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
@@ -140,6 +369,22 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertTrue(diagnostics[-1]["quality"]["passed"])
         self.assertLess(diagnostics[0]["quality"]["boundary_disagreement_score"], 1.0)
         self.assertLess(diagnostics[-1]["quality"]["boundary_disagreement_score"], 1.0)
+
+    def test_vad_window_run_carries_speech_display_bounds(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[FakeChunk("hello", language="en")],
+            align_responses=[[FakeChunk("hello", start_time=5.0, end_time=5.3)]],
+        )
+        plan = self._speech_plan(
+            [SuperChunk(0, 105.0, 120.0, 100.0, 130.0, 1)],
+            duration_sec=200.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+        diagnostic = doc.source_media["provider_metadata"]["window_diagnostics"][0]
+
+        self.assertEqual(diagnostic["display_start"], 104.8)
+        self.assertEqual(diagnostic["display_end"], 120.35)
 
     def test_provider_processes_vad_super_chunks_on_global_timeline(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
@@ -526,6 +771,23 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(merge_mock.call_count, 0)
         self.assertEqual([token.text for token in merged_tokens], ["left", "right"])
 
+    def test_owned_tokens_for_block_uses_token_overlap_not_only_start_time(self) -> None:
+        provider = QwenMlxProvider()
+        window_runs = [
+            WindowRun(
+                window=AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0),
+                text="we have",
+            )
+        ]
+        tokens = [
+            Token("we", 104.95, 105.05, unit="word"),
+            Token("have", 105.20, 105.50, unit="word"),
+        ]
+
+        owned = provider._owned_tokens_for_block(tokens, window_runs)
+
+        self.assertEqual([token.text for token in owned], ["we", "have"])
+
     def test_resolve_silence_anchor_uses_parsed_anchor_within_bounds(self) -> None:
         provider = QwenMlxProvider()
         provider._active_audio_path = Path("demo.wav")
@@ -591,6 +853,35 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertGreaterEqual(stabilized[0].end_time, 0.8)
         self.assertGreater(stabilized[2].end_time, 2.1)
         self.assertLessEqual(stabilized[2].end_time, 2.2)
+
+    def test_vad_display_bounds_clamp_segment_tail(self) -> None:
+        provider = QwenMlxProvider()
+        segments = [
+            Segment(
+                id="seg-1",
+                text="hello",
+                start_time=104.0,
+                end_time=123.0,
+                language="en",
+                tokens=[],
+            )
+        ]
+        bounds = [
+            WindowDisplayBounds(
+                start_time=104.8,
+                end_time=120.35,
+                super_chunk_index=0,
+            )
+        ]
+
+        stabilized = provider._stabilize_segment_boundaries(
+            segments,
+            total_duration_sec=200.0,
+            display_bounds=bounds,
+        )
+
+        self.assertEqual(stabilized[0].start_time, 104.8)
+        self.assertEqual(stabilized[0].end_time, 120.35)
 
 
 class QwenProviderObservabilityTest(unittest.TestCase):
