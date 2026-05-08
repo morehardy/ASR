@@ -1202,7 +1202,12 @@ class QwenMlxProvider:
         normalized = str(language).strip()
         return normalized or None
 
-    def _tokens_to_segments(self, tokens: Iterable[Token]) -> List[Segment]:
+    def _tokens_to_segments(
+        self,
+        tokens: Iterable[Token],
+        *,
+        target_max_segment_duration_sec: float = 8.0,
+    ) -> List[Segment]:
         segments: List[Segment] = []
         current_tokens: List[Token] = []
         previous_end: Optional[float] = None
@@ -1213,6 +1218,12 @@ class QwenMlxProvider:
                 if previous_end is not None and token.start_time - previous_end >= 1.0:
                     should_break = True
                 if self._ends_segment(current_tokens[-1].text):
+                    should_break = True
+                if (
+                    current_tokens
+                    and token.end_time - current_tokens[0].start_time
+                    > target_max_segment_duration_sec
+                ):
                     should_break = True
             if should_break:
                 segments.append(self._build_segment(len(segments) + 1, current_tokens))

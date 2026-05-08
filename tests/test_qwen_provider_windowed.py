@@ -53,6 +53,23 @@ class _ProviderRecordingObserver:
 
 
 class QwenProviderWindowedTest(unittest.TestCase):
+    def test_long_token_segment_splits_at_target_duration(self) -> None:
+        provider = QwenMlxProvider()
+        tokens = [
+            Token("one", 0.0, 1.0, unit="word"),
+            Token("two", 1.1, 2.0, unit="word"),
+            Token("three", 2.1, 3.0, unit="word"),
+            Token("four", 3.1, 4.0, unit="word"),
+        ]
+
+        segments = provider._tokens_to_segments(tokens, target_max_segment_duration_sec=2.5)
+
+        self.assertEqual([segment.text for segment in segments], ["one two", "three four"])
+        self.assertEqual(
+            [(segment.start_time, segment.end_time) for segment in segments],
+            [(0.0, 2.0), (2.1, 4.0)],
+        )
+
     def test_window_run_carries_display_bounds_without_provider_lookup_state(self) -> None:
         bounds = WindowDisplayBounds(
             start_time=104.8,
