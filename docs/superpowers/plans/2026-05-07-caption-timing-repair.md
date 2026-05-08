@@ -683,7 +683,7 @@ Add this test to `WindowMergeTest` in `tests/test_window_merge.py`:
 ```python
     def test_in_core_uses_token_overlap_not_only_start_time(self) -> None:
         left_tokens = [
-            Token(text="we", start_time=0.70, end_time=0.82, unit="word"),
+            Token(text="we", start_time=0.70, end_time=0.79, unit="word"),
         ]
         right_tokens = [
             Token(text="we", start_time=0.70, end_time=0.82, unit="word"),
@@ -946,34 +946,28 @@ git commit -m "feat: carry window timing provenance"
 - Modify: `src/asr/providers/qwen_mlx.py`
 - Test: `tests/test_qwen_provider_windowed.py`
 
-- [ ] **Step 1: Write failing leading-prefix provider test**
+- [ ] **Step 1: Write failing provider repair-before-split test**
 
 Add this test to `QwenProviderWindowedTest`:
 
 ```python
-    def test_left_overlap_unmatched_prefix_is_not_dropped(self) -> None:
+    def test_provider_repairs_unmatched_prefix_before_split(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[FakeChunk("we have", language="en")],
             align_responses=[
-                [FakeChunk("have", start_time=15.20, end_time=15.50)],
+                [FakeChunk("have", start_time=5.00, end_time=5.30)],
             ],
-            quality_thresholds=QualityThresholds(estimated_token_ratio_max=1.0),
         )
-        provider._probe_duration_sec = lambda _: 130.0
-        provider.window_config = provider.window_config.__class__(
-            max_alignment_window_sec=30.0,
-            target_core_window_sec=25.0,
-            min_core_window_sec=10.0,
-            context_margin_sec=15.0,
-            max_context_margin_sec=15.0,
-            anchor_search_radius_sec=2.0,
-        )
+        provider._asr_model = asr_model
+        provider._aligner_model = align_model
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
 
-        doc = provider.transcribe(Path("demo.wav"))
+        run = provider._transcribe_window(Path("demo.wav"), window)
 
-        self.assertEqual([segment.text for segment in doc.segments], ["we have"])
-        token_text = [token.text for segment in doc.segments for token in segment.tokens]
-        self.assertEqual(token_text, ["we", "have"])
+        self.assertEqual([token.text for token in run.left_overlap_tokens], ["we"])
+        self.assertEqual([token.text for token in run.core_tokens], ["have"])
+        self.assertGreater(run.left_overlap_tokens[0].start_time, 104.7)
+        self.assertLess(run.left_overlap_tokens[0].start_time, 105.0)
 ```
 
 - [ ] **Step 2: Run provider test to verify failure**
@@ -981,10 +975,10 @@ Add this test to `QwenProviderWindowedTest`:
 Run:
 
 ```bash
-uv run python -m unittest tests.test_qwen_provider_windowed.QwenProviderWindowedTest.test_left_overlap_unmatched_prefix_is_not_dropped
+uv run python -m unittest tests.test_qwen_provider_windowed.QwenProviderWindowedTest.test_provider_repairs_unmatched_prefix_before_split
 ```
 
-Expected: fail because current provider drops `we` when it falls outside core and core tokens exist.
+Expected: fail because current provider leaves unmatched `we` at `context_start` instead of repairing it near the matched core token.
 
 - [ ] **Step 3: Use detailed projection and repair in `_transcribe_window()`**
 
@@ -1003,31 +997,32 @@ with:
 
 ```python
         transcript_tokens = self._build_authoritative_tokens(text, language)
-        projected_tokens = repair_unmatched_timings(
+        repaired_projected_tokens = repair_unmatched_timings(
             project_timing_onto_transcript_detailed(
                 transcript_tokens,
                 aligner_tokens,
             ),
             clip_duration_sec=max(0.0, window.context_end - window.context_start),
         )
-        timing_source_counts = self._timing_source_counts(projected_tokens)
+        timing_source_counts = self._timing_source_counts(repaired_projected_tokens)
         has_timing_anchor = timing_source_counts.get("aligner", 0) > 0
+        global_projected_tokens = self._offset_projected_tokens(
+            repaired_projected_tokens,
+            window.context_start,
+        )
 
         usable_projected_tokens = (
-            self._usable_projected_tokens(projected_tokens)
+            self._usable_projected_tokens(global_projected_tokens)
             if has_timing_anchor
             else []
         )
-        global_tokens = self._offset_tokens(
-            [projected.token for projected in usable_projected_tokens],
-            window.context_start,
-        )
+        global_tokens = [projected.token for projected in usable_projected_tokens]
 ```
 
 Return the new fields:
 
 ```python
-            projected_tokens=projected_tokens,
+            projected_tokens=global_projected_tokens,
             timing_source_counts=timing_source_counts,
             has_timing_anchor=has_timing_anchor,
 ```
@@ -1040,6 +1035,26 @@ Add these helpers near `_offset_tokens()`:
         for projected in projected_tokens:
             counts[projected.timing_source] = counts.get(projected.timing_source, 0) + 1
         return counts
+
+    def _offset_projected_tokens(
+        self,
+        projected_tokens: Iterable[ProjectedToken],
+        offset_sec: float,
+    ) -> List[ProjectedToken]:
+        return [
+            ProjectedToken(
+                Token(
+                    text=projected.token.text,
+                    start_time=projected.token.start_time + offset_sec,
+                    end_time=projected.token.end_time + offset_sec,
+                    unit=projected.token.unit,
+                    language=projected.token.language,
+                ),
+                projected.timing_source,
+                projected.aligner_index,
+            )
+            for projected in projected_tokens
+        ]
 
     def _usable_projected_tokens(self, projected_tokens: Iterable[ProjectedToken]) -> List[ProjectedToken]:
         return [
@@ -1095,6 +1110,12 @@ git commit -m "fix: repair provider token timings before split"
 
 - [ ] **Step 1: Write failing protected prefix unit test**
 
+Add this import to `tests/test_qwen_provider_windowed.py`:
+
+```python
+from asr.providers.authority import ProjectedToken
+```
+
 Add this test to `QwenProviderWindowedTest`:
 
 ```python
@@ -1111,11 +1132,38 @@ Add this test to `QwenProviderWindowedTest`:
             core_tokens=[core],
             timing_source_counts={"aligner": 1, "estimated": 1, "unresolved": 0},
             has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(prefix, "estimated"),
+                ProjectedToken(core, "aligner", 0),
+            ],
         )
 
         preferred = provider._preferred_tokens_for_window(run)
 
         self.assertEqual([token.text for token in preferred], ["I", "have"])
+
+    def test_preferred_tokens_do_not_include_aligned_context_prefix(self) -> None:
+        provider = QwenMlxProvider()
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+        prefix = Token("to", 104.98, 105.08, unit="word")
+        core = Token("have", 105.20, 105.50, unit="word")
+        run = WindowRun(
+            window=window,
+            text="to have",
+            tokens=[prefix, core],
+            left_overlap_tokens=[prefix],
+            core_tokens=[core],
+            timing_source_counts={"aligner": 2, "estimated": 0, "unresolved": 0},
+            has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(prefix, "aligner", 0),
+                ProjectedToken(core, "aligner", 1),
+            ],
+        )
+
+        preferred = provider._preferred_tokens_for_window(run)
+
+        self.assertEqual([token.text for token in preferred], ["have"])
 ```
 
 - [ ] **Step 2: Run protected prefix test to verify failure**
@@ -1123,10 +1171,10 @@ Add this test to `QwenProviderWindowedTest`:
 Run:
 
 ```bash
-uv run python -m unittest tests.test_qwen_provider_windowed.QwenProviderWindowedTest.test_preferred_tokens_include_short_estimated_prefix_before_core
+uv run python -m unittest tests.test_qwen_provider_windowed.QwenProviderWindowedTest.test_preferred_tokens_include_short_estimated_prefix_before_core tests.test_qwen_provider_windowed.QwenProviderWindowedTest.test_preferred_tokens_do_not_include_aligned_context_prefix
 ```
 
-Expected: fail because `_preferred_tokens_for_window()` returns only `core_tokens`.
+Expected: first test fails because `_preferred_tokens_for_window()` returns only `core_tokens`; second test protects against keeping aligned short context tokens after the implementation changes.
 
 - [ ] **Step 3: Implement protected edge token selection**
 
@@ -1153,6 +1201,8 @@ Add these helpers:
         for token in reversed(window_run.left_overlap_tokens):
             if first_core.start_time - token.end_time > 0.35:
                 break
+            if self._timing_source_for_token(window_run, token) != "estimated":
+                break
             if not self._short_edge_token(token):
                 break
             prefix.append(token)
@@ -1167,6 +1217,8 @@ Add these helpers:
         for token in window_run.right_overlap_tokens:
             if token.start_time - last_core.end_time > 0.35:
                 break
+            if self._timing_source_for_token(window_run, token) != "estimated":
+                break
             if not self._short_edge_token(token):
                 break
             suffix.append(token)
@@ -1177,6 +1229,12 @@ Add these helpers:
         if token.unit == "char":
             return len(text) == 1
         return 0 < len(text) <= 3
+
+    def _timing_source_for_token(self, window_run: WindowRun, token: Token) -> str | None:
+        for projected in window_run.projected_tokens:
+            if self._same_token(projected.token, token):
+                return projected.timing_source
+        return None
 ```
 
 - [ ] **Step 4: Run provider tests**
@@ -1647,9 +1705,11 @@ Update the signature:
 
 Import `Iterable` is already available in `qwen_mlx.py`; keep using it.
 
-- [ ] **Step 4: Apply display-bound clamp inside stabilization**
+- [ ] **Step 4: Apply display-bound clamp as the final stabilization pass**
 
-After the first normalization loop in `_stabilize_segment_boundaries()`, add:
+After the existing tail-padding loop and overlap-cleanup loop in
+`_stabilize_segment_boundaries()`, add this final pass immediately before
+`return stabilized`:
 
 ```python
         bounds = list(display_bounds or [])
@@ -1660,6 +1720,14 @@ After the first normalization loop in `_stabilize_segment_boundaries()`, add:
             segment.start_time = max(segment.start_time, bound.start_time)
             segment.end_time = min(segment.end_time, bound.end_time)
             segment.end_time = max(segment.start_time, segment.end_time)
+
+        for index in range(len(stabilized) - 1):
+            if stabilized[index].end_time > stabilized[index + 1].start_time:
+                stabilized[index].end_time = stabilized[index + 1].start_time
+                stabilized[index].end_time = max(
+                    stabilized[index].start_time,
+                    stabilized[index].end_time,
+                )
 ```
 
 Add helper:
