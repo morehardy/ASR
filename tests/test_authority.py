@@ -6,6 +6,7 @@ from asr.providers.authority import (
     build_transcript_tokens,
     project_timing_onto_transcript,
     project_timing_onto_transcript_detailed,
+    repair_unmatched_timings,
 )
 
 
@@ -105,3 +106,62 @@ class AuthorityTest(unittest.TestCase):
             [(token.text, token.start_time, token.end_time) for token in projected],
             [("hello", 1.0, 1.2)],
         )
+
+    def test_unmatched_leading_short_word_gets_interpolated(self) -> None:
+        transcript_tokens = build_transcript_tokens("I have", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [Token("have", 5.20, 5.50, unit="token")],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=10.0)
+
+        self.assertEqual([item.token.text for item in repaired], ["I", "have"])
+        self.assertEqual([item.timing_source for item in repaired], ["estimated", "aligner"])
+        self.assertGreaterEqual(repaired[0].token.start_time, 5.0)
+        self.assertLess(repaired[0].token.end_time, repaired[1].token.start_time)
+        self.assertEqual((repaired[1].token.start_time, repaired[1].token.end_time), (5.20, 5.50))
+
+    def test_unmatched_middle_token_is_interpolated(self) -> None:
+        transcript_tokens = build_transcript_tokens("we really have", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [
+                Token("we", 2.00, 2.12, unit="token"),
+                Token("have", 2.80, 3.10, unit="token"),
+            ],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=5.0)
+
+        self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated", "aligner"])
+        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
+        self.assertLessEqual(repaired[1].token.end_time, repaired[2].token.start_time)
+
+    def test_unmatched_trailing_token_is_estimated_after_last_match(self) -> None:
+        transcript_tokens = build_transcript_tokens("hello there", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [Token("hello", 1.00, 1.30, unit="token")],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=1.50)
+
+        self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated"])
+        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
+        self.assertLessEqual(repaired[1].token.end_time, 1.50)
+
+    def test_fully_unmatched_tokens_remain_unresolved_for_provider_fallback(self) -> None:
+        transcript_tokens = build_transcript_tokens("C++ C#", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [
+                Token("C", 1.00, 1.10, unit="token"),
+                Token("C", 1.10, 1.20, unit="token"),
+            ],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=2.0)
+
+        self.assertEqual([item.token.text for item in repaired], ["C++", "C#"])
+        self.assertEqual([item.timing_source for item in repaired], ["unresolved", "unresolved"])
