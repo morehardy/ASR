@@ -144,6 +144,23 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(doc.segments[0].tokens, [])
         self.assertLessEqual(doc.segments[0].end_time - doc.segments[0].start_time, 6.0)
 
+    def test_partially_unresolved_window_preserves_full_text_with_fallback_segment(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[FakeChunk("a x b", language="en")],
+            align_responses=[
+                [
+                    FakeChunk("a", start_time=1.0, end_time=2.0),
+                    FakeChunk("b", start_time=1.5, end_time=1.8),
+                ]
+            ],
+        )
+        provider._probe_duration_sec = lambda _: 3.0
+
+        doc = provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual([segment.text for segment in doc.segments], ["a x b"])
+        self.assertEqual(doc.segments[0].tokens, [])
+
     def test_fallback_segment_does_not_last_until_window_core_end(self) -> None:
         provider = QwenMlxProvider()
         run = WindowRun(

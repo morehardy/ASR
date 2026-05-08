@@ -170,7 +170,7 @@ class QwenMlxProvider:
                     [
                         run
                         for run in window_runs
-                        if run.error is None and run.text and not run.has_timing_anchor
+                        if self._needs_text_fallback(run)
                     ]
                 )
                 if fallback_segments:
@@ -745,6 +745,15 @@ class QwenMlxProvider:
                 passing_block = []
                 continue
 
+            if self._needs_text_fallback(window_run):
+                merged_tokens = self._append_tokens(
+                    merged_tokens,
+                    self._merge_passing_block(passing_block),
+                    enforce_monotonic=True,
+                )
+                passing_block = []
+                continue
+
             if window_run.quality is not None and window_run.quality.passed:
                 if passing_block and not self._same_super_chunk_scope(
                     passing_block[-1],
@@ -830,6 +839,16 @@ class QwenMlxProvider:
 
     def _fallback_tokens_for_run(self, window_run: WindowRun) -> List[Token]:
         return self._preferred_tokens_for_window(window_run)
+
+    def _needs_text_fallback(self, window_run: WindowRun) -> bool:
+        return (
+            window_run.error is None
+            and bool(window_run.text.strip())
+            and (
+                window_run.timing_source_counts.get("unresolved", 0) > 0
+                or (not window_run.has_timing_anchor and not window_run.tokens)
+            )
+        )
 
     def _append_tokens(
         self,
