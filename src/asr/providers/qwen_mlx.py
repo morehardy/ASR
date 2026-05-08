@@ -1039,7 +1039,7 @@ class QwenMlxProvider:
     def _fallback_segments_from_windows(self, window_runs: List[WindowRun]) -> List[Segment]:
         segments: List[Segment] = []
         for window_run in window_runs:
-            if window_run.error is not None or not window_run.text:
+            if window_run.error is not None or not window_run.text.strip():
                 continue
             start_time = self._fallback_start_time(window_run)
             end_time = self._fallback_end_time(window_run, start_time)
@@ -1057,7 +1057,7 @@ class QwenMlxProvider:
 
     def _fallback_start_time(self, window_run: WindowRun) -> float:
         if window_run.display_bounds is not None:
-            return window_run.display_bounds.start_time
+            return max(window_run.display_bounds.start_time, window_run.window.core_start)
         return window_run.window.core_start
 
     def _fallback_end_time(self, window_run: WindowRun, start_time: float) -> float:

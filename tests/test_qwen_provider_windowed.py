@@ -110,6 +110,46 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertLessEqual(segments[0].end_time - segments[0].start_time, 6.0)
         self.assertLess(segments[0].end_time, 250.0)
 
+    def test_vad_fallback_start_uses_window_core_with_shared_display_bounds(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(
+                1,
+                70.0,
+                90.0,
+                65.0,
+                95.0,
+                super_chunk_index=0,
+            ),
+            text="late unresolved",
+            language="en",
+            display_bounds=WindowDisplayBounds(
+                start_time=19.8,
+                end_time=120.35,
+                super_chunk_index=0,
+            ),
+            has_timing_anchor=False,
+        )
+
+        segments = provider._fallback_segments_from_windows([run])
+
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].start_time, 70.0)
+        self.assertLessEqual(segments[0].end_time - segments[0].start_time, 6.0)
+
+    def test_fallback_segments_skip_whitespace_only_text(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 9.0, 21.0),
+            text="  \t\n  ",
+            language="en",
+            has_timing_anchor=False,
+        )
+
+        segments = provider._fallback_segments_from_windows([run])
+
+        self.assertEqual(segments, [])
+
     def test_preferred_tokens_include_short_estimated_prefix_before_core(self) -> None:
         provider = QwenMlxProvider()
         window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
