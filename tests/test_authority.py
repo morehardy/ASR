@@ -135,7 +135,7 @@ class AuthorityTest(unittest.TestCase):
         repaired = repair_unmatched_timings(projected, clip_duration_sec=5.0)
 
         self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated", "aligner"])
-        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
+        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time + 0.02)
         self.assertLessEqual(repaired[1].token.end_time, repaired[2].token.start_time)
 
     def test_unmatched_trailing_token_is_estimated_after_last_match(self) -> None:
@@ -150,6 +150,19 @@ class AuthorityTest(unittest.TestCase):
         self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated"])
         self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
         self.assertLessEqual(repaired[1].token.end_time, 1.50)
+
+    def test_trailing_tight_clip_does_not_move_estimate_before_last_match(self) -> None:
+        transcript_tokens = build_transcript_tokens("hello there", language="en")
+        projected = project_timing_onto_transcript_detailed(
+            transcript_tokens,
+            [Token("hello", 1.00, 1.30, unit="token")],
+        )
+
+        repaired = repair_unmatched_timings(projected, clip_duration_sec=1.20)
+
+        self.assertEqual([item.timing_source for item in repaired], ["aligner", "estimated"])
+        self.assertGreaterEqual(repaired[1].token.start_time, repaired[0].token.end_time)
+        self.assertGreaterEqual(repaired[1].token.end_time, repaired[1].token.start_time)
 
     def test_fully_unmatched_tokens_remain_unresolved_for_provider_fallback(self) -> None:
         transcript_tokens = build_transcript_tokens("C++ C#", language="en")
