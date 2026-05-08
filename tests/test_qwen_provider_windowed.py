@@ -229,6 +229,22 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertLess(diagnostics[0]["quality"]["boundary_disagreement_score"], 1.0)
         self.assertLess(diagnostics[-1]["quality"]["boundary_disagreement_score"], 1.0)
 
+    def test_vad_window_run_carries_speech_display_bounds(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[FakeChunk("hello", language="en")],
+            align_responses=[[FakeChunk("hello", start_time=5.0, end_time=5.3)]],
+        )
+        plan = self._speech_plan(
+            [SuperChunk(0, 105.0, 120.0, 100.0, 130.0, 1)],
+            duration_sec=200.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+        diagnostic = doc.source_media["provider_metadata"]["window_diagnostics"][0]
+
+        self.assertEqual(diagnostic["display_start"], 104.8)
+        self.assertEqual(diagnostic["display_end"], 120.35)
+
     def test_provider_processes_vad_super_chunks_on_global_timeline(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[

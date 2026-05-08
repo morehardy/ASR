@@ -68,6 +68,8 @@ class QwenMlxProvider:
     name: str = "qwen-mlx"
     window_config: WindowBudgetConfig = field(default_factory=WindowBudgetConfig)
     quality_thresholds: QualityThresholds = field(default_factory=QualityThresholds)
+    vad_display_lead_pad_sec: float = 0.20
+    vad_display_tail_pad_sec: float = 0.35
 
     def __post_init__(self) -> None:
         self._asr_model: Optional[Any] = None
@@ -145,6 +147,11 @@ class QwenMlxProvider:
                         window,
                         window_index=index,
                         window_count=len(windows),
+                        display_bounds=self._display_bounds_for_window(
+                            window,
+                            speech_plan=speech_plan,
+                            total_duration_sec=total_duration_sec,
+                        ),
                     )
                 )
             self._evaluate_window_qualities(window_runs)
@@ -270,7 +277,44 @@ class QwenMlxProvider:
             return 0
         return len(speech_plan.super_chunks)
 
-    def _transcribe_window(self, audio_path: Path, window: AlignmentWindow) -> WindowRun:
+    def _display_bounds_for_window(
+        self,
+        window: AlignmentWindow,
+        *,
+        speech_plan: SpeechPlan | None,
+        total_duration_sec: float,
+    ) -> WindowDisplayBounds | None:
+        if not self._uses_speech_plan(speech_plan):
+            return None
+        if window.super_chunk_index is None:
+            return None
+        assert speech_plan is not None
+        chunk = next(
+            (
+                candidate
+                for candidate in speech_plan.super_chunks
+                if candidate.index == window.super_chunk_index
+            ),
+            None,
+        )
+        if chunk is None:
+            return None
+        return WindowDisplayBounds(
+            start_time=max(0.0, chunk.speech_start - self.vad_display_lead_pad_sec),
+            end_time=min(
+                total_duration_sec,
+                chunk.speech_end + self.vad_display_tail_pad_sec,
+            ),
+            super_chunk_index=chunk.index,
+        )
+
+    def _transcribe_window(
+        self,
+        audio_path: Path,
+        window: AlignmentWindow,
+        *,
+        display_bounds: WindowDisplayBounds | None = None,
+    ) -> WindowRun:
         context_input = self._context_input_path(audio_path, window)
         context_kwargs = self._context_generate_kwargs(window)
         transcription = self._asr_model.generate(context_input, **context_kwargs)
@@ -327,6 +371,7 @@ class QwenMlxProvider:
             projected_tokens=global_projected_tokens,
             timing_source_counts=timing_source_counts,
             has_timing_anchor=has_timing_anchor,
+            display_bounds=display_bounds,
         )
 
     def _execute_window(
@@ -336,6 +381,7 @@ class QwenMlxProvider:
         *,
         window_index: int,
         window_count: int,
+        display_bounds: WindowDisplayBounds | None = None,
     ) -> WindowRun:
         meta = {"window_index": window_index, "window_count": window_count}
         if window.super_chunk_index is not None:
@@ -349,11 +395,16 @@ class QwenMlxProvider:
                 step="provider_window",
                 meta=meta,
             ):
-                return self._transcribe_window(audio_path, window)
+                return self._transcribe_window(
+                    audio_path,
+                    window,
+                    display_bounds=display_bounds,
+                )
         except Exception as exc:
             return WindowRun(
                 window=window,
                 error=str(exc),
+                display_bounds=display_bounds,
             )
 
     def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
@@ -921,6 +972,9 @@ class QwenMlxProvider:
         }
         if window_run.window.super_chunk_index is not None:
             diagnostic["super_chunk_index"] = window_run.window.super_chunk_index
+        if window_run.display_bounds is not None:
+            diagnostic["display_start"] = window_run.display_bounds.start_time
+            diagnostic["display_end"] = window_run.display_bounds.end_time
         if window_run.error is not None:
             diagnostic["error"] = window_run.error
             return diagnostic
