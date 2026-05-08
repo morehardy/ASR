@@ -173,6 +173,10 @@ class QwenMlxProvider:
                         if self._needs_text_fallback(run)
                     ]
                 )
+                fallback_segments = self._append_segments(
+                    fallback_segments,
+                    self._unresolved_fallback_segments_from_windows(window_runs),
+                )
                 if fallback_segments:
                     segments = self._append_segments(segments, fallback_segments)
                 if not segments:
@@ -694,6 +698,7 @@ class QwenMlxProvider:
                 ),
                 projected.timing_source,
                 projected.aligner_index,
+                projected.transcript_index,
             )
             for projected in projected_tokens
         ]
@@ -844,10 +849,8 @@ class QwenMlxProvider:
         return (
             window_run.error is None
             and bool(window_run.text.strip())
-            and (
-                window_run.timing_source_counts.get("unresolved", 0) > 0
-                or (not window_run.has_timing_anchor and not window_run.tokens)
-            )
+            and not window_run.has_timing_anchor
+            and not window_run.tokens
         )
 
     def _append_tokens(
@@ -958,6 +961,7 @@ class QwenMlxProvider:
         if not window_run.left_overlap_tokens or not window_run.core_tokens:
             return []
         first_core = window_run.core_tokens[0]
+        expected_index = self._transcript_index_for_token(window_run, first_core)
         prefix: List[Token] = []
         for token in reversed(window_run.left_overlap_tokens):
             if first_core.start_time - token.end_time > 0.35:
@@ -966,6 +970,11 @@ class QwenMlxProvider:
                 break
             if not self._short_edge_token(token):
                 break
+            token_index = self._transcript_index_for_token(window_run, token)
+            if expected_index is not None:
+                if token_index != expected_index - 1:
+                    break
+                expected_index = token_index
             prefix.append(token)
         prefix.reverse()
         return prefix
@@ -974,6 +983,7 @@ class QwenMlxProvider:
         if not window_run.right_overlap_tokens or not window_run.core_tokens:
             return []
         last_core = window_run.core_tokens[-1]
+        expected_index = self._transcript_index_for_token(window_run, last_core)
         suffix: List[Token] = []
         for token in window_run.right_overlap_tokens:
             if token.start_time - last_core.end_time > 0.35:
@@ -982,6 +992,11 @@ class QwenMlxProvider:
                 break
             if not self._short_edge_token(token):
                 break
+            token_index = self._transcript_index_for_token(window_run, token)
+            if expected_index is not None:
+                if token_index != expected_index + 1:
+                    break
+                expected_index = token_index
             suffix.append(token)
         return suffix
 
@@ -994,9 +1009,21 @@ class QwenMlxProvider:
     def _timing_source_for_token(
         self, window_run: WindowRun, token: Token
     ) -> str | None:
+        projected = self._projected_for_token(window_run, token)
+        return projected.timing_source if projected is not None else None
+
+    def _transcript_index_for_token(
+        self, window_run: WindowRun, token: Token
+    ) -> int | None:
+        projected = self._projected_for_token(window_run, token)
+        return projected.transcript_index if projected is not None else None
+
+    def _projected_for_token(
+        self, window_run: WindowRun, token: Token
+    ) -> ProjectedToken | None:
         for projected in window_run.projected_tokens:
             if self._same_token(projected.token, token):
-                return projected.timing_source
+                return projected
         return None
 
     def _same_token(self, left: Token, right: Token) -> bool:
@@ -1087,6 +1114,150 @@ class QwenMlxProvider:
                 )
             )
         return segments
+
+    def _unresolved_fallback_segments_from_windows(
+        self,
+        window_runs: List[WindowRun],
+    ) -> List[Segment]:
+        segments: List[Segment] = []
+        for window_run in window_runs:
+            if self._needs_text_fallback(window_run):
+                continue
+            segments = self._append_segments(
+                segments,
+                self._unresolved_fallback_segments_for_run(window_run),
+            )
+        return segments
+
+    def _unresolved_fallback_segments_for_run(
+        self,
+        window_run: WindowRun,
+    ) -> List[Segment]:
+        if (
+            window_run.error is not None
+            or not window_run.text.strip()
+            or not window_run.has_timing_anchor
+        ):
+            return []
+
+        segments: List[Segment] = []
+        projected_tokens = list(window_run.projected_tokens)
+        index = 0
+        while index < len(projected_tokens):
+            projected = projected_tokens[index]
+            if projected.timing_source != "unresolved":
+                index += 1
+                continue
+
+            group_start = index
+            group: List[ProjectedToken] = []
+            while (
+                index < len(projected_tokens)
+                and projected_tokens[index].timing_source == "unresolved"
+            ):
+                group.append(projected_tokens[index])
+                index += 1
+
+            segment = self._unresolved_group_to_segment(
+                window_run,
+                projected_tokens,
+                group,
+                group_start,
+                index,
+            )
+            if segment is not None:
+                segments.append(segment)
+
+        for segment_index, segment in enumerate(segments, start=1):
+            segment.id = f"seg-{segment_index}"
+        return segments
+
+    def _unresolved_group_to_segment(
+        self,
+        window_run: WindowRun,
+        projected_tokens: List[ProjectedToken],
+        group: List[ProjectedToken],
+        group_start: int,
+        group_end: int,
+    ) -> Segment | None:
+        previous = self._nearest_timed_projected_token(
+            projected_tokens,
+            start_index=group_start - 1,
+            step=-1,
+        )
+        if previous is None or not token_overlaps_core(
+            previous.token,
+            core_start=window_run.window.core_start,
+            core_end=window_run.window.core_end,
+        ):
+            return None
+
+        next_projected = self._nearest_timed_projected_token(
+            projected_tokens,
+            start_index=group_end,
+            step=1,
+        )
+        text = self._join_tokens(projected.token for projected in group)
+        if not text:
+            return None
+
+        duration = self._estimate_local_fallback_text_duration(
+            text,
+            window_run.language,
+        )
+        start_time = previous.token.end_time
+        if next_projected is not None:
+            end_time = min(next_projected.token.start_time, start_time + duration)
+        else:
+            end_time = start_time + duration
+
+        start_time = max(start_time, window_run.window.core_start)
+        end_time = min(end_time, window_run.window.core_end)
+        if window_run.display_bounds is not None:
+            start_time = max(start_time, window_run.display_bounds.start_time)
+            end_time = min(end_time, window_run.display_bounds.end_time)
+        if end_time <= start_time:
+            return None
+
+        return Segment(
+            id="seg-0",
+            text=text,
+            start_time=start_time,
+            end_time=end_time,
+            language=window_run.language,
+            tokens=[],
+        )
+
+    def _nearest_timed_projected_token(
+        self,
+        projected_tokens: List[ProjectedToken],
+        *,
+        start_index: int,
+        step: int,
+    ) -> ProjectedToken | None:
+        index = start_index
+        while 0 <= index < len(projected_tokens):
+            projected = projected_tokens[index]
+            if projected.timing_source in {"aligner", "estimated"}:
+                return projected
+            index += step
+        return None
+
+    def _estimate_local_fallback_text_duration(
+        self,
+        text: str,
+        language: Optional[str],
+    ) -> float:
+        normalized = (language or "").lower()
+        if (
+            normalized.startswith("zh")
+            or "chinese" in normalized
+            or self._contains_cjk(text)
+        ):
+            char_count = sum(1 for char in text if not char.isspace())
+            return min(6.0, max(0.12, char_count * 0.12))
+        word_count = len([piece for piece in text.split() if piece])
+        return min(6.0, max(0.35, word_count * 0.35))
 
     def _fallback_start_time(self, window_run: WindowRun) -> float:
         if window_run.display_bounds is not None:
@@ -1200,9 +1371,20 @@ class QwenMlxProvider:
         ]
         if not overlapping:
             return None
-        return min(
+        return max(
             overlapping,
-            key=lambda bound: abs(segment.start_time - bound.start_time),
+            key=lambda bound: self._display_bound_overlap_duration(segment, bound),
+        )
+
+    def _display_bound_overlap_duration(
+        self,
+        segment: Segment,
+        bound: WindowDisplayBounds,
+    ) -> float:
+        return max(
+            0.0,
+            min(segment.end_time, bound.end_time)
+            - max(segment.start_time, bound.start_time),
         )
 
     def _item_to_token(self, item: Any, language: Optional[str]) -> Token:
