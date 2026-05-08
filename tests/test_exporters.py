@@ -61,6 +61,46 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(payload["items"][1]["text"], "好")
         self.assertIn("source_media", payload)
 
+    def test_json_tokens_do_not_expose_provider_timing_source(self) -> None:
+        document = TranscriptionDocument(
+            source_path="demo.wav",
+            provider_name="fake",
+            source_media={
+                "provider_metadata": {
+                    "window_diagnostics": [
+                        {
+                            "timing_source_counts": {
+                                "aligner": 1,
+                                "estimated": 1,
+                                "unresolved": 0,
+                            }
+                        }
+                    ]
+                }
+            },
+            segments=[
+                Segment(
+                    id="seg-1",
+                    text="I have",
+                    start_time=5.08,
+                    end_time=5.50,
+                    language="en",
+                    tokens=[
+                        Token(text="I", start_time=5.08, end_time=5.18, unit="word", language="en"),
+                        Token(text="have", start_time=5.20, end_time=5.50, unit="word", language="en"),
+                    ],
+                )
+            ],
+        )
+
+        payload = json.loads(render_json(document, granularity="token"))
+
+        self.assertNotIn("timing_source", payload["segments"][0]["tokens"][0])
+        self.assertEqual(
+            payload["source_media"]["provider_metadata"]["window_diagnostics"][0]["timing_source_counts"]["estimated"],
+            1,
+        )
+
     def test_json_preserves_vad_metadata_without_affecting_subtitles(self) -> None:
         vad_metadata = {
             "enabled": True,
