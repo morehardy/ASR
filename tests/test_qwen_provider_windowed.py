@@ -6,7 +6,7 @@ from unittest.mock import patch
 from asr.models import Segment, Token
 from asr.observability.events import ObservabilityEvent
 from asr.providers.quality import QualityResult, QualityThresholds
-from asr.providers.qwen_mlx import QwenMlxProvider, WindowRun
+from asr.providers.qwen_mlx import QwenMlxProvider, WindowDisplayBounds, WindowRun
 from asr.providers.windowing import AlignmentWindow
 from asr.vad import DEFAULT_VAD_CONFIG, SpeechPlan, SpeechSpan, SuperChunk
 
@@ -52,6 +52,29 @@ class _ProviderRecordingObserver:
 
 
 class QwenProviderWindowedTest(unittest.TestCase):
+    def test_window_run_carries_display_bounds_without_provider_lookup_state(self) -> None:
+        bounds = WindowDisplayBounds(
+            start_time=104.8,
+            end_time=120.35,
+            super_chunk_index=0,
+        )
+        run = WindowRun(
+            window=AlignmentWindow(0, 100.0, 130.0, 100.0, 130.0, super_chunk_index=0),
+            text="hello",
+            display_bounds=bounds,
+        )
+
+        self.assertEqual(run.display_bounds, bounds)
+        self.assertFalse(hasattr(QwenMlxProvider(), "_display_bounds_by_window_index"))
+        self.assertFalse(hasattr(QwenMlxProvider(), "_window_display_bounds"))
+
+    def test_window_run_defaults_to_no_timing_anchor(self) -> None:
+        run = WindowRun(window=AlignmentWindow(0, 0.0, 1.0, 0.0, 1.0), text="hello")
+
+        self.assertFalse(run.has_timing_anchor)
+        self.assertEqual(run.timing_source_counts, {})
+        self.assertEqual(run.projected_tokens, [])
+
     def _build_provider_with_models(
         self,
         *,

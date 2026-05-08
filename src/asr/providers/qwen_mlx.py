@@ -14,8 +14,11 @@ from asr.models import Segment, Token, TranscriptionDocument
 from asr.observability.observer import Observer
 from asr.observability.timing import observe_step
 from asr.providers.authority import (
+    ProjectedToken,
     build_transcript_tokens,
     project_timing_onto_transcript,
+    project_timing_onto_transcript_detailed,
+    repair_unmatched_timings,
 )
 from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
@@ -32,6 +35,13 @@ DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
 DEFAULT_ALIGNER_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
 
 
+@dataclass(frozen=True, slots=True)
+class WindowDisplayBounds:
+    start_time: float
+    end_time: float
+    super_chunk_index: int
+
+
 @dataclass(slots=True)
 class WindowRun:
     window: AlignmentWindow
@@ -44,6 +54,10 @@ class WindowRun:
     core_text: str = ""
     quality: Optional[QualityResult] = None
     error: Optional[str] = None
+    projected_tokens: List[ProjectedToken] = field(default_factory=list)
+    timing_source_counts: dict[str, int] = field(default_factory=dict)
+    has_timing_anchor: bool = False
+    display_bounds: WindowDisplayBounds | None = None
 
 
 @dataclass
