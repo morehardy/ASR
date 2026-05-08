@@ -19,7 +19,11 @@ from asr.providers.authority import (
 )
 from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
-from asr.providers.window_merge import WindowSpan, merge_adjacent_windows
+from asr.providers.window_merge import (
+    WindowSpan,
+    merge_adjacent_windows,
+    token_overlaps_core,
+)
 from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
 from asr.vad import SpeechPlan
 
@@ -577,10 +581,14 @@ class QwenMlxProvider:
         right_overlap: List[Token] = []
 
         for token in tokens:
-            if token.start_time < window.core_start:
-                left_overlap.append(token)
-            elif token.start_time < window.core_end:
+            if token_overlaps_core(
+                token,
+                core_start=window.core_start,
+                core_end=window.core_end,
+            ):
                 core_tokens.append(token)
+            elif token.start_time < window.core_start:
+                left_overlap.append(token)
             else:
                 right_overlap.append(token)
 
@@ -673,7 +681,11 @@ class QwenMlxProvider:
             token
             for token in tokens
             if any(
-                window_run.window.core_start <= token.start_time < window_run.window.core_end
+                token_overlaps_core(
+                    token,
+                    core_start=window_run.window.core_start,
+                    core_end=window_run.window.core_end,
+                )
                 for window_run in window_runs
             )
         ]

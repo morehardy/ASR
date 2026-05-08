@@ -526,6 +526,23 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(merge_mock.call_count, 0)
         self.assertEqual([token.text for token in merged_tokens], ["left", "right"])
 
+    def test_owned_tokens_for_block_uses_token_overlap_not_only_start_time(self) -> None:
+        provider = QwenMlxProvider()
+        window_runs = [
+            WindowRun(
+                window=AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0),
+                text="we have",
+            )
+        ]
+        tokens = [
+            Token("we", 104.95, 105.05, unit="word"),
+            Token("have", 105.20, 105.50, unit="word"),
+        ]
+
+        owned = provider._owned_tokens_for_block(tokens, window_runs)
+
+        self.assertEqual([token.text for token in owned], ["we", "have"])
+
     def test_resolve_silence_anchor_uses_parsed_anchor_within_bounds(self) -> None:
         provider = QwenMlxProvider()
         provider._active_audio_path = Path("demo.wav")

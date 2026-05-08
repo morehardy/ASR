@@ -148,3 +148,36 @@ class WindowMergeTest(unittest.TestCase):
         )
 
         self.assertEqual([token.text for token in merged], ["hello", "world", "again"])
+
+    def test_in_core_uses_token_overlap_not_only_start_time(self) -> None:
+        left_tokens = [
+            Token(text="we", start_time=0.70, end_time=0.79, unit="word"),
+        ]
+        right_tokens = [
+            Token(text="we", start_time=0.70, end_time=0.82, unit="word"),
+        ]
+        left_span = WindowSpan(
+            core_start=0.0,
+            core_end=0.8,
+            context_start=0.0,
+            context_end=1.0,
+        )
+        right_span = WindowSpan(
+            core_start=0.8,
+            core_end=1.4,
+            context_start=0.6,
+            context_end=1.4,
+        )
+
+        merged = merge_adjacent_windows(
+            left_tokens,
+            right_tokens,
+            left_span,
+            right_span,
+            max_time_delta=0.20,
+        )
+
+        self.assertEqual(
+            [(token.text, token.start_time, token.end_time) for token in merged],
+            [("we", 0.70, 0.82)],
+        )

@@ -23,8 +23,24 @@ def _match(a: Token, b: Token, max_time_delta: float) -> bool:
     )
 
 
+def token_overlaps_core(
+    token: Token,
+    *,
+    core_start: float,
+    core_end: float,
+) -> bool:
+    token_end = max(token.end_time, token.start_time)
+    if token_end == token.start_time:
+        return core_start <= token.start_time < core_end
+    return token_end > core_start and token.start_time < core_end
+
+
 def _in_core(token: Token, span: WindowSpan) -> bool:
-    return span.core_start <= token.start_time < span.core_end
+    return token_overlaps_core(
+        token,
+        core_start=span.core_start,
+        core_end=span.core_end,
+    )
 
 
 def _dp_pairs(left: list[Token], right: list[Token], max_time_delta: float) -> list[tuple[int, int]]:
