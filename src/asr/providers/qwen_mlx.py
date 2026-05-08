@@ -166,6 +166,15 @@ class QwenMlxProvider:
             ):
                 merged_tokens = self._merge_window_runs(window_runs)
                 segments = self._tokens_to_segments(merged_tokens)
+                fallback_segments = self._fallback_segments_from_windows(
+                    [
+                        run
+                        for run in window_runs
+                        if run.error is None and run.text and not run.has_timing_anchor
+                    ]
+                )
+                if fallback_segments:
+                    segments = self._append_segments(segments, fallback_segments)
                 if not segments:
                     segments = self._fallback_segments_from_windows(window_runs)
                 segments = self._stabilize_segment_boundaries(
@@ -837,6 +846,29 @@ class QwenMlxProvider:
 
         return merged
 
+    def _append_segments(
+        self, existing: List[Segment], new_segments: List[Segment]
+    ) -> List[Segment]:
+        if not new_segments:
+            return existing
+        merged = list(existing)
+        for segment in new_segments:
+            merged.append(
+                Segment(
+                    id=f"seg-{len(merged) + 1}",
+                    text=segment.text,
+                    start_time=segment.start_time,
+                    end_time=segment.end_time,
+                    language=segment.language,
+                    tokens=list(segment.tokens),
+                    speaker=segment.speaker,
+                )
+            )
+        merged.sort(key=lambda segment: (segment.start_time, segment.end_time))
+        for index, segment in enumerate(merged, start=1):
+            segment.id = f"seg-{index}"
+        return merged
+
     def _coerce_monotonic_token(self, previous: Token, token: Token) -> Token:
         start_time = previous.start_time
         end_time = max(token.end_time, start_time)
@@ -1007,19 +1039,49 @@ class QwenMlxProvider:
     def _fallback_segments_from_windows(self, window_runs: List[WindowRun]) -> List[Segment]:
         segments: List[Segment] = []
         for window_run in window_runs:
-            if not window_run.text:
+            if window_run.error is not None or not window_run.text:
                 continue
+            start_time = self._fallback_start_time(window_run)
+            end_time = self._fallback_end_time(window_run, start_time)
             segments.append(
                 Segment(
                     id=f"seg-{len(segments) + 1}",
                     text=window_run.text,
-                    start_time=window_run.window.core_start,
-                    end_time=window_run.window.core_end,
+                    start_time=start_time,
+                    end_time=end_time,
                     language=window_run.language,
                     tokens=[],
                 )
             )
         return segments
+
+    def _fallback_start_time(self, window_run: WindowRun) -> float:
+        if window_run.display_bounds is not None:
+            return window_run.display_bounds.start_time
+        return window_run.window.core_start
+
+    def _fallback_end_time(self, window_run: WindowRun, start_time: float) -> float:
+        max_duration = 6.0
+        estimated_duration = min(
+            max_duration,
+            self._estimate_fallback_text_duration(window_run.text, window_run.language),
+        )
+        end_time = start_time + estimated_duration
+        if window_run.display_bounds is not None:
+            end_time = min(end_time, window_run.display_bounds.end_time)
+        else:
+            end_time = min(end_time, window_run.window.core_end)
+        return max(start_time, end_time)
+
+    def _estimate_fallback_text_duration(
+        self, text: str, language: Optional[str]
+    ) -> float:
+        normalized = (language or "").lower()
+        if normalized.startswith("zh") or "chinese" in normalized or self._contains_cjk(text):
+            char_count = sum(1 for char in text if not char.isspace())
+            return max(1.0, char_count * 0.12)
+        word_count = len([piece for piece in text.split() if piece])
+        return max(1.2, word_count * 0.35)
 
     def _stabilize_segment_boundaries(
         self,

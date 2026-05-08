@@ -76,6 +76,40 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(run.timing_source_counts, {})
         self.assertEqual(run.projected_tokens, [])
 
+    def test_fully_unresolved_window_uses_fallback_not_token_segmentation(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[FakeChunk("C++ C#", language="en")],
+            align_responses=[
+                [
+                    FakeChunk("C", start_time=1.00, end_time=1.10),
+                    FakeChunk("C", start_time=1.10, end_time=1.20),
+                ]
+            ],
+        )
+        provider._probe_duration_sec = lambda _: 40.0
+
+        doc = provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual([segment.text for segment in doc.segments], ["C++ C#"])
+        self.assertEqual(doc.segments[0].tokens, [])
+        self.assertLessEqual(doc.segments[0].end_time - doc.segments[0].start_time, 6.0)
+
+    def test_fallback_segment_does_not_last_until_window_core_end(self) -> None:
+        provider = QwenMlxProvider()
+        run = WindowRun(
+            window=AlignmentWindow(0, 100.0, 250.0, 95.0, 255.0),
+            text="bad fallback text",
+            language="en",
+            tokens=[],
+            has_timing_anchor=False,
+        )
+
+        segments = provider._fallback_segments_from_windows([run])
+
+        self.assertEqual(len(segments), 1)
+        self.assertLessEqual(segments[0].end_time - segments[0].start_time, 6.0)
+        self.assertLess(segments[0].end_time, 250.0)
+
     def test_preferred_tokens_include_short_estimated_prefix_before_core(self) -> None:
         provider = QwenMlxProvider()
         window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
