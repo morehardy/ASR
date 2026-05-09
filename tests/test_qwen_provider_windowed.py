@@ -144,7 +144,7 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(doc.segments[0].tokens, [])
         self.assertLessEqual(doc.segments[0].end_time - doc.segments[0].start_time, 6.0)
 
-    def test_partially_unresolved_window_preserves_full_text_with_fallback_segment(self) -> None:
+    def test_partially_unresolved_window_keeps_anchored_tokens_without_full_fallback(self) -> None:
         provider, _, _ = self._build_provider_with_models(
             asr_responses=[FakeChunk("a x b", language="en")],
             align_responses=[
@@ -158,8 +158,103 @@ class QwenProviderWindowedTest(unittest.TestCase):
 
         doc = provider.transcribe(Path("demo.wav"))
 
-        self.assertEqual([segment.text for segment in doc.segments], ["a x b"])
-        self.assertEqual(doc.segments[0].tokens, [])
+        self.assertEqual([segment.text for segment in doc.segments], ["a b"])
+        self.assertEqual([token.text for token in doc.segments[0].tokens], ["a", "b"])
+
+    def test_trailing_unresolved_token_emits_local_fallback_after_anchor(self) -> None:
+        provider = QwenMlxProvider()
+        anchor = Token("hello", 1.0, 1.3, unit="word")
+        unresolved = Token("there", 0.0, 0.0, unit="word")
+        run = WindowRun(
+            window=AlignmentWindow(0, 0.0, 3.0, 0.0, 3.0),
+            text="hello there",
+            language="en",
+            tokens=[anchor],
+            core_tokens=[anchor],
+            projected_tokens=[
+                ProjectedToken(anchor, "aligner", aligner_index=0, transcript_index=0),
+                ProjectedToken(unresolved, "unresolved", transcript_index=1),
+            ],
+            timing_source_counts={"aligner": 1, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        self.assertFalse(provider._needs_text_fallback(run))
+
+        segments = provider._unresolved_fallback_segments_from_windows([run])
+
+        self.assertEqual([segment.text for segment in segments], ["there"])
+        self.assertEqual(segments[0].tokens, [])
+        self.assertGreaterEqual(segments[0].start_time, anchor.end_time)
+        self.assertLessEqual(segments[0].end_time, run.window.core_end)
+
+    def test_trailing_unresolved_token_requires_previous_transcript_adjacency(self) -> None:
+        provider = QwenMlxProvider()
+        anchor = Token("hello", 10.0, 10.4, unit="word")
+        unresolved = Token("there", 0.0, 0.0, unit="word")
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 5.0, 25.0),
+            text="hello skipped there",
+            language="en",
+            tokens=[anchor],
+            core_tokens=[anchor],
+            projected_tokens=[
+                ProjectedToken(anchor, "aligner", aligner_index=0, transcript_index=0),
+                ProjectedToken(unresolved, "unresolved", transcript_index=2),
+            ],
+            timing_source_counts={"aligner": 1, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        self.assertEqual(provider._unresolved_fallback_segments_from_windows([run]), [])
+
+    def test_unresolved_context_token_does_not_emit_local_or_full_fallback(self) -> None:
+        provider = QwenMlxProvider()
+        core = Token("hello", 10.0, 10.4, unit="word")
+        context = Token("context", 0.0, 0.0, unit="word")
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 5.0, 25.0),
+            text="context hello",
+            language="en",
+            tokens=[core],
+            core_tokens=[core],
+            projected_tokens=[
+                ProjectedToken(context, "unresolved", transcript_index=0),
+                ProjectedToken(core, "aligner", aligner_index=0, transcript_index=1),
+            ],
+            timing_source_counts={"aligner": 1, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        self.assertFalse(provider._needs_text_fallback(run))
+        self.assertEqual(provider._unresolved_fallback_segments_from_windows([run]), [])
+
+    def test_leading_unresolved_core_token_uses_next_core_token_as_anchor(self) -> None:
+        provider = QwenMlxProvider()
+        context = Token("before", 9.4, 9.8, unit="word")
+        unresolved = Token("I", 0.0, 0.0, unit="word")
+        core = Token("have", 10.4, 10.8, unit="word")
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 5.0, 25.0),
+            text="before I have",
+            language="en",
+            tokens=[context, core],
+            left_overlap_tokens=[context],
+            core_tokens=[core],
+            projected_tokens=[
+                ProjectedToken(context, "aligner", aligner_index=0, transcript_index=0),
+                ProjectedToken(unresolved, "unresolved", transcript_index=1),
+                ProjectedToken(core, "aligner", aligner_index=1, transcript_index=2),
+            ],
+            timing_source_counts={"aligner": 2, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        segments = provider._unresolved_fallback_segments_from_windows([run])
+
+        self.assertEqual([segment.text for segment in segments], ["I"])
+        self.assertGreaterEqual(segments[0].start_time, run.window.core_start)
+        self.assertLessEqual(segments[0].end_time, core.start_time)
 
     def test_fallback_segment_does_not_last_until_window_core_end(self) -> None:
         provider = QwenMlxProvider()
@@ -262,6 +357,31 @@ class QwenProviderWindowedTest(unittest.TestCase):
         preferred = provider._preferred_tokens_for_window(run)
 
         self.assertEqual([token.text for token in preferred], ["have"])
+
+    def test_preferred_tokens_only_include_transcript_adjacent_estimated_prefix(self) -> None:
+        provider = QwenMlxProvider()
+        window = AlignmentWindow(0, 105.0, 120.0, 100.0, 125.0)
+        context = Token("to", 104.88, 105.00, unit="word")
+        prefix = Token("I", 104.98, 105.08, unit="word")
+        core = Token("have", 105.20, 105.50, unit="word")
+        run = WindowRun(
+            window=window,
+            text="to I have",
+            tokens=[context, prefix, core],
+            left_overlap_tokens=[context, prefix],
+            core_tokens=[core],
+            timing_source_counts={"aligner": 1, "estimated": 2, "unresolved": 0},
+            has_timing_anchor=True,
+            projected_tokens=[
+                ProjectedToken(context, "estimated", transcript_index=0),
+                ProjectedToken(prefix, "estimated", transcript_index=2),
+                ProjectedToken(core, "aligner", aligner_index=0, transcript_index=3),
+            ],
+        )
+
+        preferred = provider._preferred_tokens_for_window(run)
+
+        self.assertEqual([token.text for token in preferred], ["I", "have"])
 
     def _build_provider_with_models(
         self,
@@ -882,6 +1002,40 @@ class QwenProviderWindowedTest(unittest.TestCase):
 
         self.assertEqual(stabilized[0].start_time, 104.8)
         self.assertEqual(stabilized[0].end_time, 120.35)
+
+    def test_vad_display_bounds_use_largest_overlap_for_cross_bound_segment(self) -> None:
+        provider = QwenMlxProvider()
+        segments = [
+            Segment(
+                id="seg-1",
+                text="long cross-bound phrase",
+                start_time=15.0,
+                end_time=30.0,
+                language="en",
+                tokens=[],
+            )
+        ]
+        bounds = [
+            WindowDisplayBounds(
+                start_time=10.0,
+                end_time=20.0,
+                super_chunk_index=0,
+            ),
+            WindowDisplayBounds(
+                start_time=20.4,
+                end_time=30.0,
+                super_chunk_index=1,
+            ),
+        ]
+
+        stabilized = provider._stabilize_segment_boundaries(
+            segments,
+            total_duration_sec=40.0,
+            display_bounds=bounds,
+        )
+
+        self.assertEqual(stabilized[0].start_time, 20.4)
+        self.assertEqual(stabilized[0].end_time, 30.0)
 
 
 class QwenProviderObservabilityTest(unittest.TestCase):
