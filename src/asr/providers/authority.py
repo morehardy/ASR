@@ -18,6 +18,7 @@ class ProjectedToken:
     token: Token
     timing_source: TimingSource
     aligner_index: int | None = None
+    transcript_index: int | None = None
 
 
 def build_transcript_tokens(text: str, language: Optional[str]) -> List[Token]:
@@ -61,17 +62,31 @@ def project_timing_onto_transcript_detailed(
     projected: List[ProjectedToken] = []
     aligner_index = 0
 
-    for transcript_token in transcript_tokens:
+    for transcript_index, transcript_token in enumerate(transcript_tokens):
         match_index = _find_forward_match(transcript_token.text, aligner_tokens, aligner_index)
         if match_index is None:
-            projected.append(ProjectedToken(_clone_token(transcript_token), "unresolved", None))
+            projected.append(
+                ProjectedToken(
+                    _clone_token(transcript_token),
+                    "unresolved",
+                    None,
+                    transcript_index,
+                )
+            )
             continue
 
         aligner_token = aligner_tokens[match_index]
         aligner_index = match_index + 1
 
         if not _valid_token_timing(aligner_token):
-            projected.append(ProjectedToken(_clone_token(transcript_token), "unresolved", None))
+            projected.append(
+                ProjectedToken(
+                    _clone_token(transcript_token),
+                    "unresolved",
+                    None,
+                    transcript_index,
+                )
+            )
             continue
 
         projected.append(
@@ -85,6 +100,7 @@ def project_timing_onto_transcript_detailed(
                 ),
                 "aligner",
                 match_index,
+                transcript_index,
             )
         )
 
@@ -249,6 +265,7 @@ def _with_estimated_timing(projected: ProjectedToken, start_time: float, end_tim
         ),
         "estimated",
         projected.aligner_index,
+        projected.transcript_index,
     )
 
 
