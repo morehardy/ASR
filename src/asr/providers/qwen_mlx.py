@@ -1210,7 +1210,10 @@ class QwenMlxProvider:
             core_end=window_run.window.core_end,
         )
 
-        if previous_overlaps_core:
+        if previous_overlaps_core and self._group_is_transcript_adjacent_to_previous(
+            group,
+            previous,
+        ):
             start_time = previous.token.end_time
             if next_projected is not None:
                 end_time = min(next_projected.token.start_time, start_time + duration)
@@ -1256,6 +1259,19 @@ class QwenMlxProvider:
                 return projected
             index += step
         return None
+
+    def _group_is_transcript_adjacent_to_previous(
+        self,
+        group: List[ProjectedToken],
+        previous: ProjectedToken,
+    ) -> bool:
+        if not group:
+            return False
+        group_index = group[0].transcript_index
+        previous_index = previous.transcript_index
+        if group_index is None or previous_index is None:
+            return True
+        return group_index == previous_index + 1
 
     def _group_is_transcript_adjacent_to_next(
         self,

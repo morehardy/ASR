@@ -188,6 +188,26 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertGreaterEqual(segments[0].start_time, anchor.end_time)
         self.assertLessEqual(segments[0].end_time, run.window.core_end)
 
+    def test_trailing_unresolved_token_requires_previous_transcript_adjacency(self) -> None:
+        provider = QwenMlxProvider()
+        anchor = Token("hello", 10.0, 10.4, unit="word")
+        unresolved = Token("there", 0.0, 0.0, unit="word")
+        run = WindowRun(
+            window=AlignmentWindow(0, 10.0, 20.0, 5.0, 25.0),
+            text="hello skipped there",
+            language="en",
+            tokens=[anchor],
+            core_tokens=[anchor],
+            projected_tokens=[
+                ProjectedToken(anchor, "aligner", aligner_index=0, transcript_index=0),
+                ProjectedToken(unresolved, "unresolved", transcript_index=2),
+            ],
+            timing_source_counts={"aligner": 1, "estimated": 0, "unresolved": 1},
+            has_timing_anchor=True,
+        )
+
+        self.assertEqual(provider._unresolved_fallback_segments_from_windows([run]), [])
+
     def test_unresolved_context_token_does_not_emit_local_or_full_fallback(self) -> None:
         provider = QwenMlxProvider()
         core = Token("hello", 10.0, 10.4, unit="word")
