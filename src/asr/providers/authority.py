@@ -243,6 +243,7 @@ def _repair_middle_tokens(
         repaired,
         start_index=start_index,
         end_index=end_index,
+        previous_anchor=previous_anchor,
         next_anchor=next_anchor,
         max_estimated_token_duration_sec=max_estimated_token_duration_sec,
         prefer_next_anchor_indexes=prefer_next_anchor_indexes,
@@ -254,6 +255,7 @@ def _repair_selected_middle_tokens_from_next_anchor(
     *,
     start_index: int,
     end_index: int,
+    previous_anchor: Token,
     next_anchor: Token,
     max_estimated_token_duration_sec: float,
     prefer_next_anchor_indexes: set[int],
@@ -270,12 +272,19 @@ def _repair_selected_middle_tokens_from_next_anchor(
         if projected.transcript_index not in prefer_next_anchor_indexes:
             continue
 
+        previous_end = (
+            repaired[index - 1].token.end_time
+            if index > start_index
+            else previous_anchor.end_time
+        )
         duration = _estimated_token_duration(
             projected.token,
             max_estimated_token_duration_sec=max_estimated_token_duration_sec,
         )
         end_time = max(0.0, cursor - _ESTIMATED_TOKEN_GAP_SEC)
-        start_time = max(0.0, end_time - duration)
+        if end_time <= previous_end:
+            continue
+        start_time = max(previous_end, end_time - duration)
         repaired[index] = _with_estimated_timing(projected, start_time, end_time)
         cursor = start_time
 

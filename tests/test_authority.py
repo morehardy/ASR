@@ -289,3 +289,36 @@ class AuthorityTest(unittest.TestCase):
         )
         self.assertGreaterEqual(preferentially_repaired[2].start_time, 9.0)
         self.assertLessEqual(preferentially_repaired[2].end_time, 9.98)
+
+    def test_prefer_next_anchor_indexes_does_not_overlap_previous_anchor_in_tight_gap(self) -> None:
+        selected_index = 1
+        projected = [
+            ProjectedToken(
+                Token("left", 1.00, 1.10, unit="word"),
+                "aligner",
+                aligner_index=0,
+                transcript_index=0,
+            ),
+            ProjectedToken(
+                Token("You'd", 0.0, 0.0, unit="word"),
+                "unresolved",
+                transcript_index=selected_index,
+            ),
+            ProjectedToken(
+                Token("better", 1.15, 1.35, unit="word"),
+                "aligner",
+                aligner_index=2,
+                transcript_index=2,
+            ),
+        ]
+
+        repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=2.0,
+            prefer_next_anchor_indexes={selected_index},
+        )
+
+        self.assertEqual(repaired[1].timing_source, "estimated")
+        self.assertGreaterEqual(repaired[1].start_time, repaired[0].end_time)
+        self.assertLessEqual(repaired[1].end_time, repaired[2].start_time)
+        self.assertLessEqual(repaired[0].end_time, repaired[1].start_time)
