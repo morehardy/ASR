@@ -566,6 +566,53 @@ class QwenProviderWindowedTest(unittest.TestCase):
             all(segment.end_time - segment.start_time < 8.0 for segment in doc.segments)
         )
 
+    def test_token_crossing_vad_gap_is_repaired_before_segmentation(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("before supercalifragilistic after", language="en")
+            ],
+            align_responses=[
+                [
+                    FakeChunk("before", start_time=0.00, end_time=0.30),
+                    FakeChunk(
+                        "supercalifragilistic",
+                        start_time=0.50,
+                        end_time=4.20,
+                    ),
+                    FakeChunk("after", start_time=4.30, end_time=4.60),
+                ]
+            ],
+        )
+        plan = SpeechPlan(
+            enabled=True,
+            status="ok",
+            duration_sec=200.0,
+            raw_spans=[
+                SpeechSpan(start=100.0, end=101.0),
+                SpeechSpan(start=104.0, end=105.0),
+            ],
+            alignment_units=[
+                AlignmentUnit(
+                    index=0,
+                    speech_start=100.0,
+                    speech_end=105.0,
+                    input_start=100.0,
+                    input_end=106.0,
+                    source_span_count=2,
+                )
+            ],
+            config=DEFAULT_VAD_CONFIG,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+        tokens = [token for segment in doc.segments for token in segment.tokens]
+        repaired = next(
+            token for token in tokens if token.text == "supercalifragilistic"
+        )
+
+        self.assertLessEqual(repaired.end_time - repaired.start_time, 0.32)
+        self.assertLessEqual(repaired.end_time, 101.0)
+
     def test_provider_processes_vad_alignment_units_on_global_timeline(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[
