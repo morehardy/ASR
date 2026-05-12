@@ -23,8 +23,9 @@ class VadConfig:
     min_speech_duration_ms: int = 80
     min_silence_duration_ms: int = 300
     speech_pad_ms: int = 1200
-    merge_gap_sec: float = 12.0
-    chunk_padding_sec: float = 4.0
+    merge_gap_sec: float = 3.0
+    input_padding_sec: float = 0.8
+    max_alignment_unit_sec: float = 180.0
 
 
 DEFAULT_VAD_CONFIG = VadConfig()
@@ -44,12 +45,12 @@ class SpeechSpan:
 
 
 @dataclass(frozen=True, slots=True)
-class SuperChunk:
+class AlignmentUnit:
     index: int
     speech_start: float
     speech_end: float
-    chunk_start: float
-    chunk_end: float
+    input_start: float
+    input_end: float
     source_span_count: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,7 +63,7 @@ class SpeechPlan:
     status: Literal["disabled", "ok", "failed"]
     duration_sec: float
     raw_spans: list[SpeechSpan]
-    super_chunks: list[SuperChunk]
+    alignment_units: list[AlignmentUnit]
     config: VadConfig
     error: str | None = None
     error_code: str | None = None
@@ -84,7 +85,7 @@ def disabled_speech_plan(
         status="disabled",
         duration_sec=_safe_duration(duration_sec),
         raw_spans=[],
-        super_chunks=[],
+        alignment_units=[],
         config=config,
     )
 
@@ -102,7 +103,7 @@ def failed_speech_plan(
         status="failed",
         duration_sec=_safe_duration(duration_sec),
         raw_spans=[],
-        super_chunks=[],
+        alignment_units=[],
         config=config,
         error=error,
         error_code=error_code,
@@ -123,7 +124,7 @@ def build_speech_plan(
         status="ok",
         duration_sec=duration,
         raw_spans=sanitized,
-        super_chunks=build_super_chunks(
+        alignment_units=build_alignment_units(
             sanitized,
             duration_sec=duration,
             config=config,
@@ -154,67 +155,92 @@ def sanitize_speech_spans(
     return sanitized
 
 
-def build_super_chunks(
+def build_alignment_units(
     spans: Iterable[SpeechSpan],
     *,
     duration_sec: float,
     config: VadConfig = DEFAULT_VAD_CONFIG,
-) -> list[SuperChunk]:
+) -> list[AlignmentUnit]:
     duration = _safe_duration(duration_sec)
-    chunks: list[SuperChunk] = []
-    current_speech_start: float | None = None
-    current_speech_end: float | None = None
-    current_chunk_start: float | None = None
-    current_chunk_end: float | None = None
-    current_count = 0
+    sanitized = sanitize_speech_spans(spans, duration_sec=duration)
+    units: list[AlignmentUnit] = []
+    current: list[SpeechSpan] = []
 
-    for span in sanitize_speech_spans(spans, duration_sec=duration):
-        padded_start = max(0.0, span.start - config.chunk_padding_sec)
-        padded_end = min(duration, span.end + config.chunk_padding_sec)
-        if current_chunk_start is None or current_chunk_end is None:
-            current_speech_start = span.start
-            current_speech_end = span.end
-            current_chunk_start = padded_start
-            current_chunk_end = padded_end
-            current_count = 1
+    for span in sanitized:
+        if not current:
+            current = [span]
             continue
 
-        gap = padded_start - current_chunk_end
-        if gap <= config.merge_gap_sec:
-            current_speech_end = span.end if current_speech_end is None else max(current_speech_end, span.end)
-            current_chunk_end = max(current_chunk_end, padded_end)
-            current_count += 1
+        current_start = current[0].start
+        current_end = max(item.end for item in current)
+        gap = span.start - current_end
+        candidate_duration = max(span.end, current_end) - current_start
+
+        if (
+            gap <= config.merge_gap_sec
+            and candidate_duration <= config.max_alignment_unit_sec
+        ):
+            current.append(span)
             continue
 
-        chunks.append(
-            SuperChunk(
-                index=len(chunks),
-                speech_start=current_speech_start if current_speech_start is not None else current_chunk_start,
-                speech_end=current_speech_end if current_speech_end is not None else current_chunk_end,
-                chunk_start=current_chunk_start,
-                chunk_end=current_chunk_end,
-                source_span_count=current_count,
-            )
-        )
-        current_speech_start = span.start
-        current_speech_end = span.end
-        current_chunk_start = padded_start
-        current_chunk_end = padded_end
-        current_count = 1
+        units.append(_alignment_unit_from_spans(len(units), current, duration, config))
+        current = [span]
 
-    if current_chunk_start is not None and current_chunk_end is not None:
-        chunks.append(
-            SuperChunk(
-                index=len(chunks),
-                speech_start=current_speech_start if current_speech_start is not None else current_chunk_start,
-                speech_end=current_speech_end if current_speech_end is not None else current_chunk_end,
-                chunk_start=current_chunk_start,
-                chunk_end=current_chunk_end,
-                source_span_count=current_count,
-            )
+    if current:
+        units.append(_alignment_unit_from_spans(len(units), current, duration, config))
+
+    return _trim_overlapping_unit_inputs(units)
+
+
+def _alignment_unit_from_spans(
+    index: int,
+    spans: list[SpeechSpan],
+    duration_sec: float,
+    config: VadConfig,
+) -> AlignmentUnit:
+    speech_start = spans[0].start
+    speech_end = max(span.end for span in spans)
+    input_start = max(0.0, speech_start - config.input_padding_sec)
+    input_end = min(duration_sec, speech_end + config.input_padding_sec)
+    return AlignmentUnit(
+        index=index,
+        speech_start=speech_start,
+        speech_end=speech_end,
+        input_start=input_start,
+        input_end=input_end,
+        source_span_count=len(spans),
+    )
+
+
+def _trim_overlapping_unit_inputs(units: list[AlignmentUnit]) -> list[AlignmentUnit]:
+    if len(units) < 2:
+        return units
+
+    trimmed = list(units)
+    for index in range(len(trimmed) - 1):
+        left = trimmed[index]
+        right = trimmed[index + 1]
+        if left.input_end <= right.input_start:
+            continue
+        midpoint = (left.speech_end + right.speech_start) / 2.0
+        trimmed[index] = AlignmentUnit(
+            index=left.index,
+            speech_start=left.speech_start,
+            speech_end=left.speech_end,
+            input_start=left.input_start,
+            input_end=max(left.input_start, midpoint),
+            source_span_count=left.source_span_count,
+        )
+        trimmed[index + 1] = AlignmentUnit(
+            index=right.index,
+            speech_start=right.speech_start,
+            speech_end=right.speech_end,
+            input_start=min(right.input_end, midpoint),
+            input_end=right.input_end,
+            source_span_count=right.source_span_count,
         )
 
-    return chunks
+    return trimmed
 
 
 def speech_plan_metadata(plan: SpeechPlan) -> dict[str, Any]:
@@ -223,9 +249,9 @@ def speech_plan_metadata(plan: SpeechPlan) -> dict[str, Any]:
         "status": plan.status,
         "duration_sec": plan.duration_sec,
         "raw_span_count": len(plan.raw_spans),
-        "super_chunk_count": len(plan.super_chunks),
+        "alignment_unit_count": len(plan.alignment_units),
         "config": asdict(plan.config),
-        "super_chunks": [chunk.to_dict() for chunk in plan.super_chunks],
+        "alignment_units": [unit.to_dict() for unit in plan.alignment_units],
     }
     if plan.error is not None:
         payload["error"] = plan.error
