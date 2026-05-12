@@ -387,7 +387,7 @@ class MetricsCollectorObserverTest(unittest.TestCase):
                 meta={
                     "status": "ok",
                     "raw_span_count": 2,
-                    "super_chunk_count": 1,
+                    "alignment_unit_count": 1,
                 },
             )
         )
@@ -411,7 +411,8 @@ class MetricsCollectorObserverTest(unittest.TestCase):
         self.assertEqual(vad_step["name"], "preprocess_vad")
         self.assertEqual(vad_step["meta"]["status"], "ok")
         self.assertEqual(vad_step["meta"]["raw_span_count"], 2)
-        self.assertEqual(vad_step["meta"]["super_chunk_count"], 1)
+        self.assertEqual(vad_step["meta"]["alignment_unit_count"], 1)
+        self.assertNotIn("super_chunk_count", vad_step["meta"])
 
 
 if __name__ == "__main__":

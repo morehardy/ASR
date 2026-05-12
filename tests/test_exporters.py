@@ -108,11 +108,28 @@ class ExporterTest(unittest.TestCase):
         vad_metadata = {
             "enabled": True,
             "status": "ok",
-            "duration_sec": 60.0,
-            "raw_span_count": 0,
-            "super_chunk_count": 0,
-            "config": {"threshold": 0.25},
-            "super_chunks": [],
+            "duration_sec": 10.0,
+            "raw_span_count": 1,
+            "alignment_unit_count": 1,
+            "config": {
+                "threshold": 0.25,
+                "min_speech_duration_ms": 80,
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 1200,
+                "merge_gap_sec": 3.0,
+                "input_padding_sec": 0.8,
+                "max_alignment_unit_sec": 180.0,
+            },
+            "alignment_units": [
+                {
+                    "index": 0,
+                    "speech_start": 1.0,
+                    "speech_end": 2.0,
+                    "input_start": 0.2,
+                    "input_end": 2.8,
+                    "source_span_count": 1,
+                }
+            ],
         }
         document = TranscriptionDocument(
             source_path="quiet.wav",
