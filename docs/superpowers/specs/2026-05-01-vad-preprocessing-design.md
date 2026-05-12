@@ -2,6 +2,8 @@
 
 Date: `2026-05-01`
 
+> Superseded note, 2026-05-12: provider-facing VAD processing units were redesigned as alignment units in `2026-05-12-vad-alignment-units-design.md`. Older references to super-chunks describe the first implementation and should not guide new provider work.
+
 ## Goal
 
 Add a default VAD preprocessing stage before provider execution to address two
