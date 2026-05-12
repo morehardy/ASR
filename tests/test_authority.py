@@ -208,3 +208,34 @@ class AuthorityTest(unittest.TestCase):
 
         self.assertEqual([item.token.text for item in repaired], ["C++", "C#"])
         self.assertEqual([item.timing_source for item in repaired], ["unresolved", "unresolved"])
+
+    def test_prefer_next_anchor_indexes_repairs_only_selected_middle_tokens_against_next_anchor(self) -> None:
+        projected = [
+            ProjectedToken(
+                Token("battlefield.", 21.0, 21.5, unit="word"),
+                "aligner",
+                aligner_index=0,
+                transcript_index=0,
+            ),
+            ProjectedToken(
+                Token("You'd", 25.0, 39.4, unit="word"),
+                "unresolved",
+                transcript_index=1,
+            ),
+            ProjectedToken(
+                Token("better", 39.4, 39.6, unit="word"),
+                "aligner",
+                aligner_index=2,
+                transcript_index=2,
+            ),
+        ]
+
+        repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=45.0,
+            prefer_next_anchor_indexes={1},
+        )
+
+        self.assertEqual(repaired[1].timing_source, "estimated")
+        self.assertGreaterEqual(repaired[1].start_time, 39.0)
+        self.assertLessEqual(repaired[1].end_time, 39.38)

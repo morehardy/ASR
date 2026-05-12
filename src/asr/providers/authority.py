@@ -20,6 +20,14 @@ class ProjectedToken:
     aligner_index: int | None = None
     transcript_index: int | None = None
 
+    @property
+    def start_time(self) -> float:
+        return self.token.start_time
+
+    @property
+    def end_time(self) -> float:
+        return self.token.end_time
+
 
 def build_transcript_tokens(text: str, language: Optional[str]) -> List[Token]:
     stripped = text.strip()
@@ -112,10 +120,12 @@ def repair_unmatched_timings(
     *,
     clip_duration_sec: float | None = None,
     max_estimated_token_duration_sec: float = 0.32,
+    prefer_next_anchor_indexes: set[int] | None = None,
 ) -> List[ProjectedToken]:
     if not projected_tokens:
         return []
 
+    prefer_next_anchor_indexes = prefer_next_anchor_indexes or set()
     anchor_indexes = [
         index
         for index, projected in enumerate(projected_tokens)
@@ -144,6 +154,7 @@ def repair_unmatched_timings(
                 previous_anchor=repaired[left_anchor].token,
                 next_anchor=repaired[right_anchor].token,
                 max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+                prefer_next_anchor_indexes=prefer_next_anchor_indexes,
             )
 
     last_anchor = anchor_indexes[-1]
@@ -190,9 +201,25 @@ def _repair_middle_tokens(
     previous_anchor: Token,
     next_anchor: Token,
     max_estimated_token_duration_sec: float,
+    prefer_next_anchor_indexes: set[int],
 ) -> None:
     count = end_index - start_index
     if count <= 0:
+        return
+
+    if _should_repair_middle_group_from_next_anchor(
+        repaired,
+        start_index=start_index,
+        end_index=end_index,
+        prefer_next_anchor_indexes=prefer_next_anchor_indexes,
+    ):
+        _repair_leading_tokens(
+            repaired,
+            start_index=start_index,
+            end_index=end_index,
+            next_anchor=next_anchor,
+            max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+        )
         return
 
     raw_start = previous_anchor.end_time
@@ -226,6 +253,20 @@ def _repair_middle_tokens(
         end_time = min(available_end, start_time + duration)
         repaired[index] = _with_estimated_timing(repaired[index], start_time, end_time)
         cursor = min(available_end, start_time + slot)
+
+
+def _should_repair_middle_group_from_next_anchor(
+    repaired: List[ProjectedToken],
+    *,
+    start_index: int,
+    end_index: int,
+    prefer_next_anchor_indexes: set[int],
+) -> bool:
+    return any(
+        projected.transcript_index in prefer_next_anchor_indexes
+        for projected in repaired[start_index:end_index]
+        if projected.transcript_index is not None
+    )
 
 
 def _repair_trailing_tokens(

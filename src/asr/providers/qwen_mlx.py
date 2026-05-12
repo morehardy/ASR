@@ -21,13 +21,18 @@ from asr.providers.authority import (
 )
 from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
+from asr.providers.timing_validation import (
+    TimingValidationPolicy,
+    token_crosses_non_speech_gap,
+    token_has_suspicious_duration,
+)
 from asr.providers.window_merge import (
     WindowSpan,
     merge_adjacent_windows,
     token_overlaps_core,
 )
 from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
-from asr.vad import SpeechPlan
+from asr.vad import SpeechPlan, SpeechSpan
 
 
 DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
@@ -57,6 +62,7 @@ class WindowRun:
     timing_source_counts: dict[str, int] = field(default_factory=dict)
     has_timing_anchor: bool = False
     display_bounds: WindowDisplayBounds | None = None
+    speech_spans: List[SpeechSpan] = field(default_factory=list)
 
 
 @dataclass
@@ -68,6 +74,9 @@ class QwenMlxProvider:
     name: str = "qwen-mlx"
     window_config: WindowBudgetConfig = field(default_factory=WindowBudgetConfig)
     quality_thresholds: QualityThresholds = field(default_factory=QualityThresholds)
+    timing_validation_policy: TimingValidationPolicy = field(
+        default_factory=TimingValidationPolicy
+    )
     vad_display_lead_pad_sec: float = 0.20
     vad_display_tail_pad_sec: float = 0.35
 
@@ -121,6 +130,14 @@ class QwenMlxProvider:
             self._active_audio_path = audio_path
             try:
                 windows = self._plan_windows(total_duration_sec, speech_plan=speech_plan)
+                if (
+                    not windows
+                    and self._uses_speech_plan(speech_plan)
+                    and math.isfinite(speech_plan.duration_sec)
+                    and speech_plan.duration_sec > total_duration_sec
+                ):
+                    total_duration_sec = speech_plan.duration_sec
+                    windows = self._plan_windows(total_duration_sec, speech_plan=speech_plan)
             finally:
                 self._active_audio_path = None
 
@@ -151,6 +168,10 @@ class QwenMlxProvider:
                             window,
                             speech_plan=speech_plan,
                             total_duration_sec=total_duration_sec,
+                        ),
+                        speech_spans=self._speech_spans_for_window(
+                            window,
+                            speech_plan=speech_plan,
                         ),
                     )
                 )
@@ -326,12 +347,37 @@ class QwenMlxProvider:
             alignment_unit_index=unit.index,
         )
 
+    def _speech_spans_for_window(
+        self,
+        window: AlignmentWindow,
+        *,
+        speech_plan: SpeechPlan | None,
+    ) -> List[SpeechSpan]:
+        if speech_plan is None or window.alignment_unit_index is None:
+            return []
+        unit = next(
+            (
+                candidate
+                for candidate in speech_plan.alignment_units
+                if candidate.index == window.alignment_unit_index
+            ),
+            None,
+        )
+        if unit is None:
+            return []
+        return [
+            span
+            for span in speech_plan.raw_spans
+            if span.end >= unit.speech_start and span.start <= unit.speech_end
+        ]
+
     def _transcribe_window(
         self,
         audio_path: Path,
         window: AlignmentWindow,
         *,
         display_bounds: WindowDisplayBounds | None = None,
+        speech_spans: List[SpeechSpan] | None = None,
     ) -> WindowRun:
         context_input = self._context_input_path(audio_path, window)
         context_kwargs = self._context_generate_kwargs(window)
@@ -357,6 +403,19 @@ class QwenMlxProvider:
                 aligner_tokens,
             ),
             clip_duration_sec=max(0.0, window.context_end - window.context_start),
+        )
+        (
+            downgraded_projected_tokens,
+            prefer_next_anchor_indexes,
+        ) = self._downgrade_suspicious_projected_tokens(
+            repaired_projected_tokens,
+            speech_spans=speech_spans or [],
+            window=window,
+        )
+        repaired_projected_tokens = repair_unmatched_timings(
+            downgraded_projected_tokens,
+            clip_duration_sec=max(0.0, window.context_end - window.context_start),
+            prefer_next_anchor_indexes=prefer_next_anchor_indexes,
         )
         timing_source_counts = self._timing_source_counts(repaired_projected_tokens)
         has_timing_anchor = timing_source_counts.get("aligner", 0) > 0
@@ -390,6 +449,7 @@ class QwenMlxProvider:
             timing_source_counts=timing_source_counts,
             has_timing_anchor=has_timing_anchor,
             display_bounds=display_bounds,
+            speech_spans=list(speech_spans or []),
         )
 
     def _execute_window(
@@ -400,6 +460,7 @@ class QwenMlxProvider:
         window_index: int,
         window_count: int,
         display_bounds: WindowDisplayBounds | None = None,
+        speech_spans: List[SpeechSpan] | None = None,
     ) -> WindowRun:
         meta = {"window_index": window_index, "window_count": window_count}
         if window.alignment_unit_index is not None:
@@ -417,12 +478,14 @@ class QwenMlxProvider:
                     audio_path,
                     window,
                     display_bounds=display_bounds,
+                    speech_spans=speech_spans,
                 )
         except Exception as exc:
             return WindowRun(
                 window=window,
                 error=str(exc),
                 display_bounds=display_bounds,
+                speech_spans=list(speech_spans or []),
             )
 
     def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
@@ -681,6 +744,100 @@ class QwenMlxProvider:
         for projected in projected_tokens:
             counts[projected.timing_source] = counts.get(projected.timing_source, 0) + 1
         return counts
+
+    def _downgrade_suspicious_projected_tokens(
+        self,
+        projected_tokens: List[ProjectedToken],
+        *,
+        speech_spans: List[SpeechSpan],
+        window: AlignmentWindow,
+    ) -> tuple[List[ProjectedToken], set[int]]:
+        if not projected_tokens:
+            return [], set()
+        local_spans = [
+            SpeechSpan(
+                start=max(0.0, span.start - window.context_start),
+                end=max(0.0, span.end - window.context_start),
+                confidence=span.confidence,
+            )
+            for span in speech_spans
+        ]
+        downgraded: List[ProjectedToken] = []
+        prefer_next_anchor_indexes: set[int] = set()
+        for index, projected in enumerate(projected_tokens):
+            token = projected.token
+            suspicious = (
+                projected.timing_source == "aligner"
+                and (
+                    token_has_suspicious_duration(token, self.timing_validation_policy)
+                    or token_crosses_non_speech_gap(token, local_spans)
+                )
+            )
+            if not suspicious:
+                downgraded.append(projected)
+                continue
+            if (
+                projected.transcript_index is not None
+                and self._should_repair_suspicious_token_from_next_anchor(
+                    projected_tokens,
+                    index,
+                )
+            ):
+                prefer_next_anchor_indexes.add(projected.transcript_index)
+            downgraded.append(
+                ProjectedToken(
+                    Token(
+                        text=token.text,
+                        start_time=0.0,
+                        end_time=0.0,
+                        unit=token.unit,
+                        language=token.language,
+                    ),
+                    "unresolved",
+                    projected.aligner_index,
+                    projected.transcript_index,
+                )
+            )
+        return downgraded, prefer_next_anchor_indexes
+
+    def _should_repair_suspicious_token_from_next_anchor(
+        self,
+        projected_tokens: List[ProjectedToken],
+        index: int,
+    ) -> bool:
+        next_projected = self._nearest_projected_with_timing(
+            projected_tokens,
+            start_index=index + 1,
+            step=1,
+        )
+        if next_projected is None:
+            return False
+        previous = self._nearest_projected_with_timing(
+            projected_tokens,
+            start_index=index - 1,
+            step=-1,
+        )
+        if previous is None:
+            return True
+        token = projected_tokens[index].token
+        if self._ends_segment(previous.token.text):
+            return True
+        return token.start_time - previous.token.end_time >= 1.0
+
+    def _nearest_projected_with_timing(
+        self,
+        projected_tokens: List[ProjectedToken],
+        *,
+        start_index: int,
+        step: int,
+    ) -> ProjectedToken | None:
+        index = start_index
+        while 0 <= index < len(projected_tokens):
+            projected = projected_tokens[index]
+            if projected.timing_source in {"aligner", "estimated"}:
+                return projected
+            index += step
+        return None
 
     def _offset_projected_tokens(
         self,

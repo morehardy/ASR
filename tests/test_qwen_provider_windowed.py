@@ -524,6 +524,48 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(diagnostic["display_start"], 104.8)
         self.assertEqual(diagnostic["display_end"], 120.35)
 
+    def test_suspicious_short_word_timing_is_repaired_before_segmentation(self) -> None:
+        provider, _, _ = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("You'd better stay in line from now on.", language="en")
+            ],
+            align_responses=[
+                [
+                    FakeChunk("You'd", start_time=0.00, end_time=14.40),
+                    FakeChunk("better", start_time=14.40, end_time=14.56),
+                    FakeChunk("stay", start_time=14.56, end_time=14.88),
+                    FakeChunk("in", start_time=14.88, end_time=14.96),
+                    FakeChunk("line", start_time=14.96, end_time=15.20),
+                    FakeChunk("from", start_time=15.20, end_time=15.36),
+                    FakeChunk("now", start_time=15.36, end_time=15.60),
+                    FakeChunk("on.", start_time=15.60, end_time=16.00),
+                ]
+            ],
+        )
+        plan = self._speech_plan(
+            [
+                AlignmentUnit(
+                    index=0,
+                    speech_start=10498.6,
+                    speech_end=10500.7,
+                    input_start=10484.52,
+                    input_end=10501.5,
+                    source_span_count=1,
+                )
+            ],
+            duration_sec=10600.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+        tokens = [token for segment in doc.segments for token in segment.tokens]
+        youd = next(token for token in tokens if token.text == "You'd")
+
+        self.assertLessEqual(youd.end_time - youd.start_time, 0.32)
+        self.assertGreaterEqual(youd.start_time, 10498.0)
+        self.assertTrue(
+            all(segment.end_time - segment.start_time < 8.0 for segment in doc.segments)
+        )
+
     def test_provider_processes_vad_alignment_units_on_global_timeline(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[
