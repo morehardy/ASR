@@ -180,6 +180,28 @@ class VadPlanningTest(unittest.TestCase):
             self.assertLessEqual(unit.input_start, unit.speech_start)
             self.assertGreaterEqual(unit.input_end, unit.speech_end)
 
+    def test_alignment_unit_prefers_raw_gap_boundary_when_capping_chain(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(0.0, 80.0),
+                SpeechSpan(82.0, 100.0),
+                SpeechSpan(90.0, 240.0),
+            ],
+            duration_sec=300.0,
+            config=config,
+        )
+
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
+            [(0.0, 80.0, 1), (82.0, 240.0, 2)],
+        )
+
     def test_build_speech_plan_sorts_sanitized_spans(self) -> None:
         plan = build_speech_plan(
             duration_sec=20.0,

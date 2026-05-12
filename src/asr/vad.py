@@ -211,6 +211,22 @@ def _append_alignment_units(
         units.append(_alignment_unit_from_spans(len(units), spans, duration_sec, config))
         return
 
+    gap_split_index = _best_gap_split_index(spans, max_duration)
+    if gap_split_index is not None:
+        _append_alignment_units(
+            units,
+            spans[:gap_split_index],
+            duration_sec,
+            config,
+        )
+        _append_alignment_units(
+            units,
+            spans[gap_split_index:],
+            duration_sec,
+            config,
+        )
+        return
+
     segment_start = speech_start
     while segment_start < speech_end:
         segment_end = min(speech_end, segment_start + max_duration)
@@ -232,6 +248,29 @@ def _append_alignment_units(
             )
         )
         segment_start = segment_end
+
+
+def _best_gap_split_index(
+    spans: list[SpeechSpan],
+    max_duration_sec: float,
+) -> int | None:
+    if len(spans) < 2:
+        return None
+
+    segment_start = spans[0].start
+    covered_end = spans[0].end
+    best_index: int | None = None
+    best_gap = 0.0
+
+    for index, span in enumerate(spans[1:], start=1):
+        gap = span.start - covered_end
+        if gap > 0.0 and covered_end - segment_start <= max_duration_sec:
+            if gap >= best_gap:
+                best_index = index
+                best_gap = gap
+        covered_end = max(covered_end, span.end)
+
+    return best_index
 
 
 def _alignment_unit_from_spans(
