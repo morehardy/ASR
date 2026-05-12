@@ -207,21 +207,6 @@ def _repair_middle_tokens(
     if count <= 0:
         return
 
-    if _should_repair_middle_group_from_next_anchor(
-        repaired,
-        start_index=start_index,
-        end_index=end_index,
-        prefer_next_anchor_indexes=prefer_next_anchor_indexes,
-    ):
-        _repair_leading_tokens(
-            repaired,
-            start_index=start_index,
-            end_index=end_index,
-            next_anchor=next_anchor,
-            max_estimated_token_duration_sec=max_estimated_token_duration_sec,
-        )
-        return
-
     raw_start = previous_anchor.end_time
     raw_end = next_anchor.start_time
     raw_available = raw_end - raw_start
@@ -254,19 +239,45 @@ def _repair_middle_tokens(
         repaired[index] = _with_estimated_timing(repaired[index], start_time, end_time)
         cursor = min(available_end, start_time + slot)
 
+    _repair_selected_middle_tokens_from_next_anchor(
+        repaired,
+        start_index=start_index,
+        end_index=end_index,
+        next_anchor=next_anchor,
+        max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+        prefer_next_anchor_indexes=prefer_next_anchor_indexes,
+    )
 
-def _should_repair_middle_group_from_next_anchor(
+
+def _repair_selected_middle_tokens_from_next_anchor(
     repaired: List[ProjectedToken],
     *,
     start_index: int,
     end_index: int,
+    next_anchor: Token,
+    max_estimated_token_duration_sec: float,
     prefer_next_anchor_indexes: set[int],
-) -> bool:
-    return any(
-        projected.transcript_index in prefer_next_anchor_indexes
-        for projected in repaired[start_index:end_index]
-        if projected.transcript_index is not None
-    )
+) -> None:
+    if not prefer_next_anchor_indexes:
+        return
+
+    cursor = next_anchor.start_time
+    for index in range(end_index - 1, start_index - 1, -1):
+        if index + 1 < end_index:
+            cursor = min(cursor, repaired[index + 1].token.start_time)
+
+        projected = repaired[index]
+        if projected.transcript_index not in prefer_next_anchor_indexes:
+            continue
+
+        duration = _estimated_token_duration(
+            projected.token,
+            max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+        )
+        end_time = max(0.0, cursor - _ESTIMATED_TOKEN_GAP_SEC)
+        start_time = max(0.0, end_time - duration)
+        repaired[index] = _with_estimated_timing(projected, start_time, end_time)
+        cursor = start_time
 
 
 def _repair_trailing_tokens(

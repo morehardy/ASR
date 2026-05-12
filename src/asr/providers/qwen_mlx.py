@@ -127,17 +127,14 @@ class QwenMlxProvider:
             step="provider_plan_windows",
         ):
             total_duration_sec = self._probe_duration_sec(audio_path)
+            if (
+                self._uses_speech_plan(speech_plan)
+                and math.isfinite(speech_plan.duration_sec)
+            ):
+                total_duration_sec = max(total_duration_sec, speech_plan.duration_sec)
             self._active_audio_path = audio_path
             try:
                 windows = self._plan_windows(total_duration_sec, speech_plan=speech_plan)
-                if (
-                    not windows
-                    and self._uses_speech_plan(speech_plan)
-                    and math.isfinite(speech_plan.duration_sec)
-                    and speech_plan.duration_sec > total_duration_sec
-                ):
-                    total_duration_sec = speech_plan.duration_sec
-                    windows = self._plan_windows(total_duration_sec, speech_plan=speech_plan)
             finally:
                 self._active_audio_path = None
 
@@ -754,14 +751,16 @@ class QwenMlxProvider:
     ) -> tuple[List[ProjectedToken], set[int]]:
         if not projected_tokens:
             return [], set()
-        local_spans = [
-            SpeechSpan(
-                start=max(0.0, span.start - window.context_start),
-                end=max(0.0, span.end - window.context_start),
-                confidence=span.confidence,
+        context_duration = max(0.0, window.context_end - window.context_start)
+        local_spans: List[SpeechSpan] = []
+        for span in speech_spans:
+            start = min(context_duration, max(0.0, span.start - window.context_start))
+            end = min(context_duration, max(0.0, span.end - window.context_start))
+            if end <= start:
+                continue
+            local_spans.append(
+                SpeechSpan(start=start, end=end, confidence=span.confidence)
             )
-            for span in speech_spans
-        ]
         downgraded: List[ProjectedToken] = []
         prefer_next_anchor_indexes: set[int] = set()
         for index, projected in enumerate(projected_tokens):

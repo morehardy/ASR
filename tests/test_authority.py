@@ -239,3 +239,53 @@ class AuthorityTest(unittest.TestCase):
         self.assertEqual(repaired[1].timing_source, "estimated")
         self.assertGreaterEqual(repaired[1].start_time, 39.0)
         self.assertLessEqual(repaired[1].end_time, 39.38)
+
+    def test_prefer_next_anchor_indexes_preserves_unselected_middle_estimates(self) -> None:
+        selected_index = 2
+        projected = [
+            ProjectedToken(
+                Token("left", 1.0, 1.4, unit="word"),
+                "aligner",
+                aligner_index=0,
+                transcript_index=0,
+            ),
+            ProjectedToken(
+                Token("plain", 0.0, 0.0, unit="word"),
+                "unresolved",
+                transcript_index=1,
+            ),
+            ProjectedToken(
+                Token("You'd", 0.0, 0.0, unit="word"),
+                "unresolved",
+                transcript_index=selected_index,
+            ),
+            ProjectedToken(
+                Token("better", 10.0, 10.2, unit="word"),
+                "aligner",
+                aligner_index=3,
+                transcript_index=3,
+            ),
+        ]
+
+        normally_repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=12.0,
+        )
+        preferentially_repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=12.0,
+            prefer_next_anchor_indexes={selected_index},
+        )
+
+        self.assertEqual(
+            (
+                preferentially_repaired[1].start_time,
+                preferentially_repaired[1].end_time,
+            ),
+            (
+                normally_repaired[1].start_time,
+                normally_repaired[1].end_time,
+            ),
+        )
+        self.assertGreaterEqual(preferentially_repaired[2].start_time, 9.0)
+        self.assertLessEqual(preferentially_repaired[2].end_time, 9.98)

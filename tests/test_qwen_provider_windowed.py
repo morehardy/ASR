@@ -612,6 +612,40 @@ class QwenProviderWindowedTest(unittest.TestCase):
             [100.0, 100.41, 280.0, 280.51],
         )
 
+    def test_provider_uses_speech_plan_duration_to_keep_later_vad_units(self) -> None:
+        provider, asr_model, align_model = self._build_provider_with_models(
+            asr_responses=[
+                FakeChunk("first unit", language="en"),
+                FakeChunk("second unit", language="en"),
+            ],
+            align_responses=[
+                [
+                    FakeChunk("first", start_time=0.00, end_time=0.40),
+                    FakeChunk("unit", start_time=0.41, end_time=0.90),
+                ],
+                [
+                    FakeChunk("second", start_time=0.00, end_time=0.50),
+                    FakeChunk("unit", start_time=0.51, end_time=1.00),
+                ],
+            ],
+        )
+        provider._probe_duration_sec = lambda _: 160.0
+        plan = self._speech_plan(
+            [
+                AlignmentUnit(0, 105.0, 120.0, 100.0, 130.0, 1),
+                AlignmentUnit(1, 285.0, 300.0, 280.0, 310.0, 1),
+            ],
+            duration_sec=400.0,
+        )
+
+        doc = provider.transcribe(Path("demo.wav"), speech_plan=plan)
+
+        diagnostics = doc.source_media["provider_metadata"]["window_diagnostics"]
+        self.assertEqual([item["alignment_unit_index"] for item in diagnostics], [0, 1])
+        self.assertEqual(len(asr_model.calls), 2)
+        self.assertEqual(len(align_model.calls), 2)
+        self.assertEqual(doc.source_media["provider_metadata"]["duration_sec"], 400.0)
+
     def test_provider_splits_long_alignment_unit_with_existing_hard_window_budget(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
             asr_responses=[
@@ -688,7 +722,7 @@ class QwenProviderWindowedTest(unittest.TestCase):
         self.assertEqual(len(align_model.calls), 1)
         self.assertEqual([item["alignment_unit_index"] for item in diagnostics], [2])
         self.assertEqual(diagnostics[0]["context_start"], 310.0)
-        self.assertEqual(diagnostics[0]["context_end"], 340.0)
+        self.assertEqual(diagnostics[0]["context_end"], 390.0)
 
     def test_single_window_failure_does_not_abort_full_run_and_records_diagnostic(self) -> None:
         provider, asr_model, align_model = self._build_provider_with_models(
