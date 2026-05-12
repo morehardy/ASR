@@ -229,7 +229,12 @@ def _append_alignment_units(
 
     segment_start = speech_start
     while segment_start < speech_end:
-        segment_end = min(speech_end, segment_start + max_duration)
+        segment_end = _best_span_boundary_split_time(
+            spans,
+            segment_start=segment_start,
+            speech_end=speech_end,
+            max_duration_sec=max_duration,
+        )
         overlapping_spans = [
             span
             for span in spans
@@ -271,6 +276,25 @@ def _best_gap_split_index(
         covered_end = max(covered_end, span.end)
 
     return best_index
+
+
+def _best_span_boundary_split_time(
+    spans: list[SpeechSpan],
+    *,
+    segment_start: float,
+    speech_end: float,
+    max_duration_sec: float,
+) -> float:
+    hard_end = min(speech_end, segment_start + max_duration_sec)
+    span_boundary = max(
+        (
+            span.end
+            for span in spans
+            if segment_start < span.end <= hard_end
+        ),
+        default=None,
+    )
+    return span_boundary if span_boundary is not None else hard_end
 
 
 def _alignment_unit_from_spans(

@@ -151,7 +151,7 @@ class VadPlanningTest(unittest.TestCase):
 
         self.assertEqual(
             [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
-            [(0.0, 180.0, 2), (180.0, 181.0, 1)],
+            [(0.0, 179.0, 2), (179.0, 181.0, 1)],
         )
         for unit in units:
             self.assertLessEqual(unit.input_start, unit.speech_start)
@@ -175,6 +175,10 @@ class VadPlanningTest(unittest.TestCase):
         )
 
         self.assertGreater(len(units), 1)
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end) for unit in units],
+            [(0.0, 120.0), (120.0, 240.0), (240.0, 360.0)],
+        )
         for unit in units:
             self.assertLessEqual(unit.speech_end - unit.speech_start, 180.0)
             self.assertLessEqual(unit.input_start, unit.speech_start)

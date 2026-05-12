@@ -724,6 +724,45 @@ class QwenProviderWindowedTest(unittest.TestCase):
             )
             self.assertEqual(diagnostic["alignment_unit_index"], 0)
 
+    def test_speech_spans_for_window_include_alignment_unit_input_padding(self) -> None:
+        provider = QwenMlxProvider()
+        plan = SpeechPlan(
+            enabled=True,
+            status="ok",
+            duration_sec=200.0,
+            raw_spans=[
+                SpeechSpan(start=100.0, end=101.0),
+                SpeechSpan(start=104.0, end=105.0),
+                SpeechSpan(start=108.0, end=109.0),
+            ],
+            alignment_units=[
+                AlignmentUnit(
+                    index=0,
+                    speech_start=104.0,
+                    speech_end=105.0,
+                    input_start=100.0,
+                    input_end=106.0,
+                    source_span_count=1,
+                )
+            ],
+            config=DEFAULT_VAD_CONFIG,
+        )
+        window = AlignmentWindow(
+            0,
+            104.0,
+            105.0,
+            100.0,
+            106.0,
+            alignment_unit_index=0,
+        )
+
+        spans = provider._speech_spans_for_window(window, speech_plan=plan)
+
+        self.assertEqual(
+            [(span.start, span.end) for span in spans],
+            [(100.0, 101.0), (104.0, 105.0)],
+        )
+
     def test_vad_alignment_unit_anchor_resolver_uses_global_timeline(self) -> None:
         provider = QwenMlxProvider()
         seen_calls: list[tuple[float, float, float]] = []

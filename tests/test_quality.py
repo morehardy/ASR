@@ -165,6 +165,12 @@ class QualityGateTest(unittest.TestCase):
 
         self.assertFalse(token_has_suspicious_duration(token, policy))
 
+    def test_cjk_text_is_not_stripped_before_duration_validation(self) -> None:
+        policy = TimingValidationPolicy()
+        token = Token("你好", start_time=1.0, end_time=2.2, unit="word")
+
+        self.assertTrue(token_has_suspicious_duration(token, policy))
+
     def test_token_crossing_vad_non_speech_gap_is_suspicious(self) -> None:
         token = Token("You'd", start_time=10.5, end_time=14.2, unit="word")
         speech_spans = [

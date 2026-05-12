@@ -365,7 +365,7 @@ class QwenMlxProvider:
         return [
             span
             for span in speech_plan.raw_spans
-            if span.end >= unit.speech_start and span.start <= unit.speech_end
+            if span.end >= unit.input_start and span.start <= unit.input_end
         ]
 
     def _transcribe_window(
