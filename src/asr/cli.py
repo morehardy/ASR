@@ -46,10 +46,11 @@ app = typer.Typer(
 )
 
 
-def _version_callback(value: bool) -> None:
+def _version_callback(value: bool) -> bool:
     if value:
-        typer.echo(f"easr {__version__}")
+        print(f"easr {__version__}")
         raise typer.Exit(code=0)
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:

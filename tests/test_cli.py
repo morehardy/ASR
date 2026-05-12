@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import asr
 from asr.cli import (
+    _version_callback,
     app,
     build_fish_completion_script,
     build_parser,
@@ -43,6 +44,9 @@ class CliTyperBootstrapTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(stdout.getvalue(), f"easr {asr.__version__}\n")
         mock_run_transcription.assert_not_called()
+
+    def test_version_callback_preserves_false_value(self) -> None:
+        self.assertIs(_version_callback(False), False)
 
     @patch("asr.cli.discover_cli_sources")
     @patch("asr.cli.run_environment_preflight")
