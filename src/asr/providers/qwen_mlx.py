@@ -38,7 +38,7 @@ DEFAULT_ALIGNER_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
 class WindowDisplayBounds:
     start_time: float
     end_time: float
-    super_chunk_index: int
+    alignment_unit_index: int
 
 
 @dataclass(slots=True)
@@ -126,7 +126,7 @@ class QwenMlxProvider:
 
         self._begin_context_windowing()
         speech_plan_used = self._uses_speech_plan(speech_plan)
-        super_chunk_count = self._super_chunk_count(speech_plan)
+        alignment_unit_count = self._alignment_unit_count(speech_plan)
         try:
             if not windows:
                 return self._build_document(
@@ -136,7 +136,7 @@ class QwenMlxProvider:
                     window_runs=[],
                     segments=[],
                     speech_plan_used=speech_plan_used,
-                    super_chunk_count=super_chunk_count,
+                    alignment_unit_count=alignment_unit_count,
                 )
 
             window_runs: List[WindowRun] = []
@@ -198,7 +198,7 @@ class QwenMlxProvider:
                 window_runs=window_runs,
                 segments=segments,
                 speech_plan_used=speech_plan_used,
-                super_chunk_count=super_chunk_count,
+                alignment_unit_count=alignment_unit_count,
             )
         finally:
             self._cleanup_context_windowing()
@@ -217,22 +217,22 @@ class QwenMlxProvider:
             return planner.plan(total_duration_sec)
 
         windows: List[AlignmentWindow] = []
-        for chunk in speech_plan.super_chunks:
-            chunk_start, chunk_end = self._clamped_super_chunk_bounds(
-                chunk.chunk_start,
-                chunk.chunk_end,
+        for unit in speech_plan.alignment_units:
+            unit_start, unit_end = self._clamped_alignment_unit_bounds(
+                unit.input_start,
+                unit.input_end,
                 total_duration_sec,
             )
-            if chunk_start is None or chunk_end is None:
+            if unit_start is None or unit_end is None:
                 continue
 
             planner = WindowPlanner(
                 self.window_config,
-                anchor_resolver=self._chunk_anchor_resolver(chunk_start),
+                anchor_resolver=self._unit_anchor_resolver(unit_start),
             )
-            local_windows = planner.plan(chunk_end - chunk_start)
+            local_windows = planner.plan(unit_end - unit_start)
             for local_window in local_windows:
-                offset = chunk_start
+                offset = unit_start
                 windows.append(
                     AlignmentWindow(
                         index=len(windows),
@@ -240,13 +240,13 @@ class QwenMlxProvider:
                         core_end=local_window.core_end + offset,
                         context_start=local_window.context_start + offset,
                         context_end=local_window.context_end + offset,
-                        super_chunk_index=chunk.index,
+                        alignment_unit_index=unit.index,
                     )
                 )
         return windows
 
-    def _chunk_anchor_resolver(
-        self, chunk_start: float
+    def _unit_anchor_resolver(
+        self, unit_start: float
     ) -> Callable[[float, float, float], Optional[float]]:
         def resolve(
             target_split_sec: float,
@@ -254,31 +254,31 @@ class QwenMlxProvider:
             search_end_sec: float,
         ) -> Optional[float]:
             resolved = self._resolve_silence_anchor(
-                target_split_sec + chunk_start,
-                search_start_sec + chunk_start,
-                search_end_sec + chunk_start,
+                target_split_sec + unit_start,
+                search_start_sec + unit_start,
+                search_end_sec + unit_start,
             )
             if resolved is None:
                 return None
-            return resolved - chunk_start
+            return resolved - unit_start
 
         return resolve
 
-    def _clamped_super_chunk_bounds(
+    def _clamped_alignment_unit_bounds(
         self,
-        chunk_start: float,
-        chunk_end: float,
+        input_start: float,
+        input_end: float,
         total_duration_sec: float,
     ) -> tuple[float | None, float | None]:
         if not (
-            math.isfinite(chunk_start)
-            and math.isfinite(chunk_end)
+            math.isfinite(input_start)
+            and math.isfinite(input_end)
             and math.isfinite(total_duration_sec)
         ):
             return None, None
 
-        clamped_start = min(max(0.0, chunk_start), total_duration_sec)
-        clamped_end = min(max(0.0, chunk_end), total_duration_sec)
+        clamped_start = min(max(0.0, input_start), total_duration_sec)
+        clamped_end = min(max(0.0, input_end), total_duration_sec)
         if clamped_end <= clamped_start:
             return None, None
         return clamped_start, clamped_end
@@ -287,13 +287,13 @@ class QwenMlxProvider:
         return (
             speech_plan is not None
             and speech_plan.status == "ok"
-            and bool(speech_plan.super_chunks)
+            and bool(speech_plan.alignment_units)
         )
 
-    def _super_chunk_count(self, speech_plan: SpeechPlan | None) -> int:
+    def _alignment_unit_count(self, speech_plan: SpeechPlan | None) -> int:
         if speech_plan is None or speech_plan.status != "ok":
             return 0
-        return len(speech_plan.super_chunks)
+        return len(speech_plan.alignment_units)
 
     def _display_bounds_for_window(
         self,
@@ -304,26 +304,26 @@ class QwenMlxProvider:
     ) -> WindowDisplayBounds | None:
         if not self._uses_speech_plan(speech_plan):
             return None
-        if window.super_chunk_index is None:
+        if window.alignment_unit_index is None:
             return None
         assert speech_plan is not None
-        chunk = next(
+        unit = next(
             (
                 candidate
-                for candidate in speech_plan.super_chunks
-                if candidate.index == window.super_chunk_index
+                for candidate in speech_plan.alignment_units
+                if candidate.index == window.alignment_unit_index
             ),
             None,
         )
-        if chunk is None:
+        if unit is None:
             return None
         return WindowDisplayBounds(
-            start_time=max(0.0, chunk.speech_start - self.vad_display_lead_pad_sec),
+            start_time=max(0.0, unit.speech_start - self.vad_display_lead_pad_sec),
             end_time=min(
                 total_duration_sec,
-                chunk.speech_end + self.vad_display_tail_pad_sec,
+                unit.speech_end + self.vad_display_tail_pad_sec,
             ),
-            super_chunk_index=chunk.index,
+            alignment_unit_index=unit.index,
         )
 
     def _transcribe_window(
@@ -402,8 +402,8 @@ class QwenMlxProvider:
         display_bounds: WindowDisplayBounds | None = None,
     ) -> WindowRun:
         meta = {"window_index": window_index, "window_count": window_count}
-        if window.super_chunk_index is not None:
-            meta["super_chunk_index"] = window.super_chunk_index
+        if window.alignment_unit_index is not None:
+            meta["alignment_unit_index"] = window.alignment_unit_index
         try:
             with observe_step(
                 self._observer,
@@ -491,13 +491,13 @@ class QwenMlxProvider:
         expected_index = window_runs[index].window.index + step
         if candidate.window.index != expected_index:
             return None
-        if not self._same_super_chunk_scope(window_runs[index], candidate):
+        if not self._same_alignment_unit_scope(window_runs[index], candidate):
             return None
 
         return candidate
 
-    def _same_super_chunk_scope(self, left: WindowRun, right: WindowRun) -> bool:
-        return left.window.super_chunk_index == right.window.super_chunk_index
+    def _same_alignment_unit_scope(self, left: WindowRun, right: WindowRun) -> bool:
+        return left.window.alignment_unit_index == right.window.alignment_unit_index
 
     def _raise_if_all_windows_failed(self, window_runs: List[WindowRun]) -> None:
         if any(window_run.error is None for window_run in window_runs):
@@ -760,7 +760,7 @@ class QwenMlxProvider:
                 continue
 
             if window_run.quality is not None and window_run.quality.passed:
-                if passing_block and not self._same_super_chunk_scope(
+                if passing_block and not self._same_alignment_unit_scope(
                     passing_block[-1],
                     window_run,
                 ):
@@ -916,7 +916,7 @@ class QwenMlxProvider:
         window_runs: List[WindowRun],
         segments: List[Segment],
         speech_plan_used: bool = False,
-        super_chunk_count: int = 0,
+        alignment_unit_count: int = 0,
     ) -> TranscriptionDocument:
         detected_language = next(
             (run.language for run in window_runs if run.language is not None),
@@ -930,7 +930,7 @@ class QwenMlxProvider:
         )
         provider_metadata = {
             "processing_strategy": (
-                "vad_super_chunk_windowed_bounded_alignment"
+                "vad_alignment_unit_bounded_alignment"
                 if speech_plan_used
                 else "windowed_bounded_alignment"
             ),
@@ -945,7 +945,7 @@ class QwenMlxProvider:
             ],
         }
         if speech_plan_used:
-            provider_metadata["super_chunk_count"] = super_chunk_count
+            provider_metadata["alignment_unit_count"] = alignment_unit_count
         document.ensure_source_media()["provider_metadata"] = provider_metadata
         return document
 
@@ -1055,8 +1055,8 @@ class QwenMlxProvider:
             "timing_source_counts": dict(window_run.timing_source_counts),
             "has_timing_anchor": window_run.has_timing_anchor,
         }
-        if window_run.window.super_chunk_index is not None:
-            diagnostic["super_chunk_index"] = window_run.window.super_chunk_index
+        if window_run.window.alignment_unit_index is not None:
+            diagnostic["alignment_unit_index"] = window_run.window.alignment_unit_index
         if window_run.display_bounds is not None:
             diagnostic["display_start"] = window_run.display_bounds.start_time
             diagnostic["display_end"] = window_run.display_bounds.end_time
