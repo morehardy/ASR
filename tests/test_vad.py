@@ -133,7 +133,7 @@ class VadPlanningTest(unittest.TestCase):
             [(0.0, 100.0, 1), (102.0, 185.0, 2)],
         )
 
-    def test_alignment_unit_does_not_split_overlapping_spans_at_hard_ceiling(self) -> None:
+    def test_alignment_unit_splits_overlapping_spans_at_hard_ceiling(self) -> None:
         config = VadConfig(
             merge_gap_sec=3.0,
             input_padding_sec=0.8,
@@ -151,9 +151,32 @@ class VadPlanningTest(unittest.TestCase):
 
         self.assertEqual(
             [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
-            [(0.0, 181.0, 2)],
+            [(0.0, 180.0, 2), (180.0, 181.0, 1)],
         )
         for unit in units:
+            self.assertLessEqual(unit.input_start, unit.speech_start)
+            self.assertGreaterEqual(unit.input_end, unit.speech_end)
+
+    def test_alignment_unit_caps_long_overlapping_chain(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(0.0, 120.0),
+                SpeechSpan(100.0, 240.0),
+                SpeechSpan(220.0, 360.0),
+            ],
+            duration_sec=400.0,
+            config=config,
+        )
+
+        self.assertGreater(len(units), 1)
+        for unit in units:
+            self.assertLessEqual(unit.speech_end - unit.speech_start, 180.0)
             self.assertLessEqual(unit.input_start, unit.speech_start)
             self.assertGreaterEqual(unit.input_end, unit.speech_end)
 

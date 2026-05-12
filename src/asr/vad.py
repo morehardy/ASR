@@ -183,13 +183,55 @@ def build_alignment_units(
             current.append(span)
             continue
 
-        units.append(_alignment_unit_from_spans(len(units), current, duration, config))
+        _append_alignment_units(units, current, duration, config)
         current = [span]
 
     if current:
-        units.append(_alignment_unit_from_spans(len(units), current, duration, config))
+        _append_alignment_units(units, current, duration, config)
 
     return _trim_overlapping_unit_inputs(units)
+
+
+def _append_alignment_units(
+    units: list[AlignmentUnit],
+    spans: list[SpeechSpan],
+    duration_sec: float,
+    config: VadConfig,
+) -> None:
+    speech_start = spans[0].start
+    speech_end = max(span.end for span in spans)
+    speech_duration = speech_end - speech_start
+    max_duration = config.max_alignment_unit_sec
+    if (
+        len(spans) == 1
+        or not math.isfinite(max_duration)
+        or speech_duration <= max_duration
+        or max_duration <= 0.0
+    ):
+        units.append(_alignment_unit_from_spans(len(units), spans, duration_sec, config))
+        return
+
+    segment_start = speech_start
+    while segment_start < speech_end:
+        segment_end = min(speech_end, segment_start + max_duration)
+        overlapping_spans = [
+            span
+            for span in spans
+            if span.start < segment_end and span.end > segment_start
+        ]
+        input_start = max(0.0, segment_start - config.input_padding_sec)
+        input_end = min(duration_sec, segment_end + config.input_padding_sec)
+        units.append(
+            AlignmentUnit(
+                index=len(units),
+                speech_start=segment_start,
+                speech_end=segment_end,
+                input_start=input_start,
+                input_end=input_end,
+                source_span_count=len(overlapping_spans),
+            )
+        )
+        segment_start = segment_end
 
 
 def _alignment_unit_from_spans(
