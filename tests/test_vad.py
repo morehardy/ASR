@@ -4,8 +4,10 @@ import unittest
 
 from asr.vad import (
     DEFAULT_VAD_CONFIG,
+    AlignmentUnit,
     SpeechSpan,
     VadConfig,
+    build_alignment_units,
     build_speech_plan,
     disabled_speech_plan,
     failed_speech_plan,
@@ -14,28 +16,28 @@ from asr.vad import (
 
 
 class VadPlanningTest(unittest.TestCase):
-    def test_build_speech_plan_sanitizes_pads_merges_and_clamps(self) -> None:
+    def test_build_speech_plan_sanitizes_pads_merges_and_clamps_alignment_units(self) -> None:
         config = VadConfig(
             threshold=0.25,
             min_speech_duration_ms=80,
             min_silence_duration_ms=300,
             speech_pad_ms=1200,
-            merge_gap_sec=12.0,
-            chunk_padding_sec=4.0,
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
         )
         raw_spans = [
             SpeechSpan(start=10.0, end=12.0),
+            SpeechSpan(start=14.5, end=15.0),
             SpeechSpan(start=20.0, end=20.0),
             SpeechSpan(start=math.nan, end=22.0),
             SpeechSpan(start=-2.0, end=1.0, confidence=math.inf),
-            SpeechSpan(start=24.0, end=25.0),
-            SpeechSpan(start=50.0, end=51.0),
-            SpeechSpan(start=70.0, end=75.0),
-            SpeechSpan(start=58.0, end=65.0, confidence=0.9),
+            SpeechSpan(start=19.0, end=20.0, confidence=0.9),
+            SpeechSpan(start=27.0, end=29.0),
         ]
 
         plan = build_speech_plan(
-            duration_sec=60.0,
+            duration_sec=30.0,
             raw_spans=raw_spans,
             config=config,
         )
@@ -43,41 +45,165 @@ class VadPlanningTest(unittest.TestCase):
         self.assertEqual(plan.status, "ok")
         self.assertEqual(
             [(span.start, span.end) for span in plan.raw_spans],
-            [(0.0, 1.0), (10.0, 12.0), (24.0, 25.0), (50.0, 51.0), (58.0, 60.0)],
+            [(0.0, 1.0), (10.0, 12.0), (14.5, 15.0), (19.0, 20.0), (27.0, 29.0)],
         )
         self.assertIsNone(plan.raw_spans[0].confidence)
-        self.assertEqual(plan.raw_spans[-1].confidence, 0.9)
-        self.assertEqual(len(plan.super_chunks), 2)
-        first = plan.super_chunks[0]
-        second = plan.super_chunks[1]
-        self.assertEqual(first.index, 0)
-        self.assertEqual(first.source_span_count, 3)
-        self.assertEqual((first.speech_start, first.speech_end), (0.0, 25.0))
-        self.assertEqual((first.chunk_start, first.chunk_end), (0.0, 29.0))
-        self.assertEqual(second.index, 1)
-        self.assertEqual(second.source_span_count, 2)
-        self.assertEqual((second.speech_start, second.speech_end), (50.0, 60.0))
-        self.assertEqual((second.chunk_start, second.chunk_end), (46.0, 60.0))
+        self.assertEqual(plan.raw_spans[3].confidence, 0.9)
         self.assertEqual(
-            speech_plan_metadata(plan)["super_chunks"],
             [
-                {
-                    "index": 0,
-                    "speech_start": 0.0,
-                    "speech_end": 25.0,
-                    "chunk_start": 0.0,
-                    "chunk_end": 29.0,
-                    "source_span_count": 3,
-                },
-                {
-                    "index": 1,
-                    "speech_start": 50.0,
-                    "speech_end": 60.0,
-                    "chunk_start": 46.0,
-                    "chunk_end": 60.0,
-                    "source_span_count": 2,
-                },
+                (
+                    unit.index,
+                    unit.speech_start,
+                    unit.speech_end,
+                    unit.input_start,
+                    unit.input_end,
+                    unit.source_span_count,
+                )
+                for unit in plan.alignment_units
             ],
+            [
+                (0, 0.0, 1.0, 0.0, 1.8, 1),
+                (1, 10.0, 15.0, 9.2, 15.8, 2),
+                (2, 19.0, 20.0, 18.2, 20.8, 1),
+                (3, 27.0, 29.0, 26.2, 29.8, 1),
+            ],
+        )
+        metadata = speech_plan_metadata(plan)
+        self.assertEqual(metadata["alignment_unit_count"], 4)
+        self.assertNotIn("super_chunk_count", metadata)
+        self.assertNotIn("super_chunks", metadata)
+
+    def test_alignment_units_merge_spans_within_three_seconds(self) -> None:
+        config = VadConfig(merge_gap_sec=3.0, input_padding_sec=0.8)
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(10.0, 11.0),
+                SpeechSpan(13.5, 14.0),
+                SpeechSpan(18.0, 19.0),
+            ],
+            duration_sec=30.0,
+            config=config,
+        )
+
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
+            [(10.0, 14.0, 2), (18.0, 19.0, 1)],
+        )
+
+    def test_alignment_unit_input_padding_overlap_is_trimmed_at_speech_midpoint(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=2.0,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(10.0, 11.0),
+                SpeechSpan(14.2, 15.0),
+            ],
+            duration_sec=30.0,
+            config=config,
+        )
+
+        self.assertEqual(len(units), 2)
+        self.assertEqual(units[0].input_end, 12.6)
+        self.assertEqual(units[1].input_start, 12.6)
+
+    def test_alignment_unit_splits_before_exceeding_hard_ceiling(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(0.0, 100.0),
+                SpeechSpan(102.0, 181.0),
+                SpeechSpan(183.0, 185.0),
+            ],
+            duration_sec=200.0,
+            config=config,
+        )
+
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
+            [(0.0, 100.0, 1), (102.0, 185.0, 2)],
+        )
+
+    def test_alignment_unit_splits_overlapping_spans_at_hard_ceiling(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(0.0, 179.0),
+                SpeechSpan(100.0, 181.0),
+            ],
+            duration_sec=200.0,
+            config=config,
+        )
+
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
+            [(0.0, 179.0, 2), (179.0, 181.0, 1)],
+        )
+        for unit in units:
+            self.assertLessEqual(unit.input_start, unit.speech_start)
+            self.assertGreaterEqual(unit.input_end, unit.speech_end)
+
+    def test_alignment_unit_caps_long_overlapping_chain(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(0.0, 120.0),
+                SpeechSpan(100.0, 240.0),
+                SpeechSpan(220.0, 360.0),
+            ],
+            duration_sec=400.0,
+            config=config,
+        )
+
+        self.assertGreater(len(units), 1)
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end) for unit in units],
+            [(0.0, 120.0), (120.0, 240.0), (240.0, 360.0)],
+        )
+        for unit in units:
+            self.assertLessEqual(unit.speech_end - unit.speech_start, 180.0)
+            self.assertLessEqual(unit.input_start, unit.speech_start)
+            self.assertGreaterEqual(unit.input_end, unit.speech_end)
+
+    def test_alignment_unit_prefers_raw_gap_boundary_when_capping_chain(self) -> None:
+        config = VadConfig(
+            merge_gap_sec=3.0,
+            input_padding_sec=0.8,
+            max_alignment_unit_sec=180.0,
+        )
+
+        units = build_alignment_units(
+            [
+                SpeechSpan(0.0, 80.0),
+                SpeechSpan(82.0, 100.0),
+                SpeechSpan(90.0, 240.0),
+            ],
+            duration_sec=300.0,
+            config=config,
+        )
+
+        self.assertEqual(
+            [(unit.speech_start, unit.speech_end, unit.source_span_count) for unit in units],
+            [(0.0, 80.0, 1), (82.0, 240.0, 2)],
         )
 
     def test_build_speech_plan_sorts_sanitized_spans(self) -> None:
@@ -103,7 +229,7 @@ class VadPlanningTest(unittest.TestCase):
         self.assertTrue(plan.enabled)
         self.assertEqual(plan.status, "ok")
         self.assertEqual(plan.raw_spans, [])
-        self.assertEqual(plan.super_chunks, [])
+        self.assertEqual(plan.alignment_units, [])
 
     def test_disabled_and_failed_plans_serialize_to_metadata(self) -> None:
         disabled = disabled_speech_plan(config=DEFAULT_VAD_CONFIG)
@@ -165,7 +291,7 @@ class SileroVadPreprocessorTest(unittest.TestCase):
         self.assertEqual([(span.start, span.end) for span in plan.raw_spans], [(1.0, 2.0), (3.0, 3.5)])
         self.assertTrue(seen_kwargs["return_seconds"])
         self.assertEqual(plan.config.threshold, 0.25)
-        self.assertEqual(len(plan.super_chunks), 1)
+        self.assertEqual(len(plan.alignment_units), 1)
 
     def test_silero_preprocessor_accepts_second_timestamps(self) -> None:
         from asr.vad import SileroVadPreprocessor

@@ -20,6 +20,14 @@ class ProjectedToken:
     aligner_index: int | None = None
     transcript_index: int | None = None
 
+    @property
+    def start_time(self) -> float:
+        return self.token.start_time
+
+    @property
+    def end_time(self) -> float:
+        return self.token.end_time
+
 
 def build_transcript_tokens(text: str, language: Optional[str]) -> List[Token]:
     stripped = text.strip()
@@ -112,10 +120,12 @@ def repair_unmatched_timings(
     *,
     clip_duration_sec: float | None = None,
     max_estimated_token_duration_sec: float = 0.32,
+    prefer_next_anchor_indexes: set[int] | None = None,
 ) -> List[ProjectedToken]:
     if not projected_tokens:
         return []
 
+    prefer_next_anchor_indexes = prefer_next_anchor_indexes or set()
     anchor_indexes = [
         index
         for index, projected in enumerate(projected_tokens)
@@ -144,6 +154,7 @@ def repair_unmatched_timings(
                 previous_anchor=repaired[left_anchor].token,
                 next_anchor=repaired[right_anchor].token,
                 max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+                prefer_next_anchor_indexes=prefer_next_anchor_indexes,
             )
 
     last_anchor = anchor_indexes[-1]
@@ -190,6 +201,7 @@ def _repair_middle_tokens(
     previous_anchor: Token,
     next_anchor: Token,
     max_estimated_token_duration_sec: float,
+    prefer_next_anchor_indexes: set[int],
 ) -> None:
     count = end_index - start_index
     if count <= 0:
@@ -226,6 +238,55 @@ def _repair_middle_tokens(
         end_time = min(available_end, start_time + duration)
         repaired[index] = _with_estimated_timing(repaired[index], start_time, end_time)
         cursor = min(available_end, start_time + slot)
+
+    _repair_selected_middle_tokens_from_next_anchor(
+        repaired,
+        start_index=start_index,
+        end_index=end_index,
+        previous_anchor=previous_anchor,
+        next_anchor=next_anchor,
+        max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+        prefer_next_anchor_indexes=prefer_next_anchor_indexes,
+    )
+
+
+def _repair_selected_middle_tokens_from_next_anchor(
+    repaired: List[ProjectedToken],
+    *,
+    start_index: int,
+    end_index: int,
+    previous_anchor: Token,
+    next_anchor: Token,
+    max_estimated_token_duration_sec: float,
+    prefer_next_anchor_indexes: set[int],
+) -> None:
+    if not prefer_next_anchor_indexes:
+        return
+
+    cursor = next_anchor.start_time
+    for index in range(end_index - 1, start_index - 1, -1):
+        if index + 1 < end_index:
+            cursor = min(cursor, repaired[index + 1].token.start_time)
+
+        projected = repaired[index]
+        if projected.transcript_index not in prefer_next_anchor_indexes:
+            continue
+
+        previous_end = (
+            repaired[index - 1].token.end_time
+            if index > start_index
+            else previous_anchor.end_time
+        )
+        duration = _estimated_token_duration(
+            projected.token,
+            max_estimated_token_duration_sec=max_estimated_token_duration_sec,
+        )
+        end_time = max(0.0, cursor - _ESTIMATED_TOKEN_GAP_SEC)
+        if end_time <= previous_end:
+            continue
+        start_time = max(previous_end, end_time - duration)
+        repaired[index] = _with_estimated_timing(projected, start_time, end_time)
+        cursor = start_time
 
 
 def _repair_trailing_tokens(

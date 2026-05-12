@@ -208,3 +208,117 @@ class AuthorityTest(unittest.TestCase):
 
         self.assertEqual([item.token.text for item in repaired], ["C++", "C#"])
         self.assertEqual([item.timing_source for item in repaired], ["unresolved", "unresolved"])
+
+    def test_prefer_next_anchor_indexes_repairs_only_selected_middle_tokens_against_next_anchor(self) -> None:
+        projected = [
+            ProjectedToken(
+                Token("battlefield.", 21.0, 21.5, unit="word"),
+                "aligner",
+                aligner_index=0,
+                transcript_index=0,
+            ),
+            ProjectedToken(
+                Token("You'd", 25.0, 39.4, unit="word"),
+                "unresolved",
+                transcript_index=1,
+            ),
+            ProjectedToken(
+                Token("better", 39.4, 39.6, unit="word"),
+                "aligner",
+                aligner_index=2,
+                transcript_index=2,
+            ),
+        ]
+
+        repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=45.0,
+            prefer_next_anchor_indexes={1},
+        )
+
+        self.assertEqual(repaired[1].timing_source, "estimated")
+        self.assertGreaterEqual(repaired[1].start_time, 39.0)
+        self.assertLessEqual(repaired[1].end_time, 39.38)
+
+    def test_prefer_next_anchor_indexes_preserves_unselected_middle_estimates(self) -> None:
+        selected_index = 2
+        projected = [
+            ProjectedToken(
+                Token("left", 1.0, 1.4, unit="word"),
+                "aligner",
+                aligner_index=0,
+                transcript_index=0,
+            ),
+            ProjectedToken(
+                Token("plain", 0.0, 0.0, unit="word"),
+                "unresolved",
+                transcript_index=1,
+            ),
+            ProjectedToken(
+                Token("You'd", 0.0, 0.0, unit="word"),
+                "unresolved",
+                transcript_index=selected_index,
+            ),
+            ProjectedToken(
+                Token("better", 10.0, 10.2, unit="word"),
+                "aligner",
+                aligner_index=3,
+                transcript_index=3,
+            ),
+        ]
+
+        normally_repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=12.0,
+        )
+        preferentially_repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=12.0,
+            prefer_next_anchor_indexes={selected_index},
+        )
+
+        self.assertEqual(
+            (
+                preferentially_repaired[1].start_time,
+                preferentially_repaired[1].end_time,
+            ),
+            (
+                normally_repaired[1].start_time,
+                normally_repaired[1].end_time,
+            ),
+        )
+        self.assertGreaterEqual(preferentially_repaired[2].start_time, 9.0)
+        self.assertLessEqual(preferentially_repaired[2].end_time, 9.98)
+
+    def test_prefer_next_anchor_indexes_does_not_overlap_previous_anchor_in_tight_gap(self) -> None:
+        selected_index = 1
+        projected = [
+            ProjectedToken(
+                Token("left", 1.00, 1.10, unit="word"),
+                "aligner",
+                aligner_index=0,
+                transcript_index=0,
+            ),
+            ProjectedToken(
+                Token("You'd", 0.0, 0.0, unit="word"),
+                "unresolved",
+                transcript_index=selected_index,
+            ),
+            ProjectedToken(
+                Token("better", 1.15, 1.35, unit="word"),
+                "aligner",
+                aligner_index=2,
+                transcript_index=2,
+            ),
+        ]
+
+        repaired = repair_unmatched_timings(
+            projected,
+            clip_duration_sec=2.0,
+            prefer_next_anchor_indexes={selected_index},
+        )
+
+        self.assertEqual(repaired[1].timing_source, "estimated")
+        self.assertGreaterEqual(repaired[1].start_time, repaired[0].end_time)
+        self.assertLessEqual(repaired[1].end_time, repaired[2].start_time)
+        self.assertLessEqual(repaired[0].end_time, repaired[1].start_time)

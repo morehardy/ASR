@@ -5,7 +5,7 @@ from asr.models import Segment, Token, TranscriptionDocument
 from asr.observability.events import ObservabilityEvent
 from asr.pipeline import _provider_accepts_speech_plan, process_media_file
 from asr.providers.base import Provider
-from asr.vad import DEFAULT_VAD_CONFIG, SpeechPlan, SpeechSpan, SuperChunk, failed_speech_plan
+from asr.vad import DEFAULT_VAD_CONFIG, AlignmentUnit, SpeechPlan, SpeechSpan, failed_speech_plan
 
 
 class FakeProvider(Provider):
@@ -221,15 +221,15 @@ class PipelineTest(unittest.TestCase):
         speech_plan = SpeechPlan(
             enabled=True,
             status="ok",
-            duration_sec=100.0,
-            raw_spans=[SpeechSpan(start=10.0, end=12.0)],
-            super_chunks=[
-                SuperChunk(
+            duration_sec=20.0,
+            raw_spans=[SpeechSpan(start=1.0, end=2.0)],
+            alignment_units=[
+                AlignmentUnit(
                     index=0,
-                    speech_start=10.0,
-                    speech_end=12.0,
-                    chunk_start=6.0,
-                    chunk_end=16.0,
+                    speech_start=1.0,
+                    speech_end=2.0,
+                    input_start=0.2,
+                    input_end=2.8,
                     source_span_count=1,
                 )
             ],
@@ -248,7 +248,7 @@ class PipelineTest(unittest.TestCase):
         self.assertIs(provider.received_plan, speech_plan)
         self.assertEqual(vad.calls, [Path("clip.wav")])
         self.assertEqual(document.source_media["vad"]["status"], "ok")
-        self.assertEqual(document.source_media["vad"]["super_chunk_count"], 1)
+        self.assertEqual(document.source_media["vad"]["alignment_unit_count"], 1)
         self.assertEqual(document.source_media["prepared_audio_path"], "clip.wav")
 
     def test_required_speech_plan_parameter_is_not_optional_provider_extension(self) -> None:
@@ -258,15 +258,15 @@ class PipelineTest(unittest.TestCase):
         speech_plan = SpeechPlan(
             enabled=True,
             status="ok",
-            duration_sec=100.0,
-            raw_spans=[SpeechSpan(start=10.0, end=12.0)],
-            super_chunks=[
-                SuperChunk(
+            duration_sec=20.0,
+            raw_spans=[SpeechSpan(start=1.0, end=2.0)],
+            alignment_units=[
+                AlignmentUnit(
                     index=0,
-                    speech_start=10.0,
-                    speech_end=12.0,
-                    chunk_start=6.0,
-                    chunk_end=16.0,
+                    speech_start=1.0,
+                    speech_end=2.0,
+                    input_start=0.2,
+                    input_end=2.8,
                     source_span_count=1,
                 )
             ],
@@ -283,21 +283,21 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(provider.calls, [Path("clip.wav")])
         self.assertEqual(provider.received_kwargs, {})
-        self.assertEqual(document.source_media["vad"]["super_chunk_count"], 1)
+        self.assertEqual(document.source_media["vad"]["alignment_unit_count"], 1)
 
     def test_pipeline_does_not_keyword_pass_speech_plan_to_positional_only_provider(self) -> None:
         speech_plan = SpeechPlan(
             enabled=True,
             status="ok",
-            duration_sec=100.0,
-            raw_spans=[SpeechSpan(start=10.0, end=12.0)],
-            super_chunks=[
-                SuperChunk(
+            duration_sec=20.0,
+            raw_spans=[SpeechSpan(start=1.0, end=2.0)],
+            alignment_units=[
+                AlignmentUnit(
                     index=0,
-                    speech_start=10.0,
-                    speech_end=12.0,
-                    chunk_start=6.0,
-                    chunk_end=16.0,
+                    speech_start=1.0,
+                    speech_end=2.0,
+                    input_start=0.2,
+                    input_end=2.8,
                     source_span_count=1,
                 )
             ],
@@ -314,15 +314,15 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(provider.calls, [Path("clip.wav")])
         self.assertIsNone(provider.received_plan)
-        self.assertEqual(document.source_media["vad"]["super_chunk_count"], 1)
+        self.assertEqual(document.source_media["vad"]["alignment_unit_count"], 1)
 
     def test_pipeline_skips_provider_when_vad_finds_no_speech(self) -> None:
         speech_plan = SpeechPlan(
             enabled=True,
             status="ok",
-            duration_sec=90.0,
+            duration_sec=20.0,
             raw_spans=[],
-            super_chunks=[],
+            alignment_units=[],
             config=DEFAULT_VAD_CONFIG,
         )
 
@@ -337,7 +337,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(document.segments, [])
         self.assertEqual(document.source_path, "quiet.mp4")
         self.assertEqual(document.source_media["vad"]["status"], "ok")
-        self.assertEqual(document.source_media["vad"]["super_chunk_count"], 0)
+        self.assertEqual(document.source_media["vad"]["alignment_unit_count"], 0)
 
     def test_pipeline_falls_back_without_speech_plan_when_vad_fails(self) -> None:
         failed_plan = failed_speech_plan(
@@ -434,15 +434,15 @@ class PipelineObservabilityTest(unittest.TestCase):
         speech_plan = SpeechPlan(
             enabled=True,
             status="ok",
-            duration_sec=30.0,
+            duration_sec=20.0,
             raw_spans=[SpeechSpan(start=1.0, end=2.0)],
-            super_chunks=[
-                SuperChunk(
+            alignment_units=[
+                AlignmentUnit(
                     index=0,
                     speech_start=1.0,
                     speech_end=2.0,
-                    chunk_start=0.0,
-                    chunk_end=6.0,
+                    input_start=0.2,
+                    input_end=2.8,
                     source_span_count=1,
                 )
             ],
@@ -483,4 +483,4 @@ class PipelineObservabilityTest(unittest.TestCase):
         )
         self.assertEqual(vad_end.meta["status"], "ok")
         self.assertEqual(vad_end.meta["raw_span_count"], 1)
-        self.assertEqual(vad_end.meta["super_chunk_count"], 1)
+        self.assertEqual(vad_end.meta["alignment_unit_count"], 1)

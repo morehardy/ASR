@@ -55,7 +55,7 @@ def process_media_file(
             source_path=str(source_path),
         )
 
-    if speech_plan.status == "ok" and not speech_plan.super_chunks:
+    if speech_plan.status == "ok" and not speech_plan.alignment_units:
         document = TranscriptionDocument(
             source_path=str(prepared_path),
             provider_name=provider.name,
@@ -92,7 +92,7 @@ def _transcribe_provider(
 ) -> TranscriptionDocument:
     if (
         speech_plan.status == "ok"
-        and speech_plan.super_chunks
+        and speech_plan.alignment_units
         and _provider_accepts_speech_plan(provider)
     ):
         return provider.transcribe(prepared_path, speech_plan=speech_plan)  # type: ignore[call-arg]
@@ -193,7 +193,7 @@ def _speech_plan_event_meta(plan: SpeechPlan) -> dict[str, object]:
         "status": plan.status,
         "duration_sec": plan.duration_sec,
         "raw_span_count": len(plan.raw_spans),
-        "super_chunk_count": len(plan.super_chunks),
+        "alignment_unit_count": len(plan.alignment_units),
     }
     if plan.error is not None:
         meta["error"] = plan.error

@@ -21,13 +21,18 @@ from asr.providers.authority import (
 )
 from asr.providers.media_probe import parse_silence_anchors, probe_duration_sec
 from asr.providers.quality import QualityResult, QualityThresholds, evaluate_quality
+from asr.providers.timing_validation import (
+    TimingValidationPolicy,
+    token_crosses_non_speech_gap,
+    token_has_suspicious_duration,
+)
 from asr.providers.window_merge import (
     WindowSpan,
     merge_adjacent_windows,
     token_overlaps_core,
 )
 from asr.providers.windowing import AlignmentWindow, WindowBudgetConfig, WindowPlanner
-from asr.vad import SpeechPlan
+from asr.vad import SpeechPlan, SpeechSpan
 
 
 DEFAULT_ASR_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
@@ -38,7 +43,7 @@ DEFAULT_ALIGNER_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
 class WindowDisplayBounds:
     start_time: float
     end_time: float
-    super_chunk_index: int
+    alignment_unit_index: int
 
 
 @dataclass(slots=True)
@@ -57,6 +62,7 @@ class WindowRun:
     timing_source_counts: dict[str, int] = field(default_factory=dict)
     has_timing_anchor: bool = False
     display_bounds: WindowDisplayBounds | None = None
+    speech_spans: List[SpeechSpan] = field(default_factory=list)
 
 
 @dataclass
@@ -68,6 +74,9 @@ class QwenMlxProvider:
     name: str = "qwen-mlx"
     window_config: WindowBudgetConfig = field(default_factory=WindowBudgetConfig)
     quality_thresholds: QualityThresholds = field(default_factory=QualityThresholds)
+    timing_validation_policy: TimingValidationPolicy = field(
+        default_factory=TimingValidationPolicy
+    )
     vad_display_lead_pad_sec: float = 0.20
     vad_display_tail_pad_sec: float = 0.35
 
@@ -118,6 +127,11 @@ class QwenMlxProvider:
             step="provider_plan_windows",
         ):
             total_duration_sec = self._probe_duration_sec(audio_path)
+            if (
+                self._uses_speech_plan(speech_plan)
+                and math.isfinite(speech_plan.duration_sec)
+            ):
+                total_duration_sec = max(total_duration_sec, speech_plan.duration_sec)
             self._active_audio_path = audio_path
             try:
                 windows = self._plan_windows(total_duration_sec, speech_plan=speech_plan)
@@ -126,7 +140,7 @@ class QwenMlxProvider:
 
         self._begin_context_windowing()
         speech_plan_used = self._uses_speech_plan(speech_plan)
-        super_chunk_count = self._super_chunk_count(speech_plan)
+        alignment_unit_count = self._alignment_unit_count(speech_plan)
         try:
             if not windows:
                 return self._build_document(
@@ -136,7 +150,7 @@ class QwenMlxProvider:
                     window_runs=[],
                     segments=[],
                     speech_plan_used=speech_plan_used,
-                    super_chunk_count=super_chunk_count,
+                    alignment_unit_count=alignment_unit_count,
                 )
 
             window_runs: List[WindowRun] = []
@@ -151,6 +165,10 @@ class QwenMlxProvider:
                             window,
                             speech_plan=speech_plan,
                             total_duration_sec=total_duration_sec,
+                        ),
+                        speech_spans=self._speech_spans_for_window(
+                            window,
+                            speech_plan=speech_plan,
                         ),
                     )
                 )
@@ -198,7 +216,7 @@ class QwenMlxProvider:
                 window_runs=window_runs,
                 segments=segments,
                 speech_plan_used=speech_plan_used,
-                super_chunk_count=super_chunk_count,
+                alignment_unit_count=alignment_unit_count,
             )
         finally:
             self._cleanup_context_windowing()
@@ -217,22 +235,22 @@ class QwenMlxProvider:
             return planner.plan(total_duration_sec)
 
         windows: List[AlignmentWindow] = []
-        for chunk in speech_plan.super_chunks:
-            chunk_start, chunk_end = self._clamped_super_chunk_bounds(
-                chunk.chunk_start,
-                chunk.chunk_end,
+        for unit in speech_plan.alignment_units:
+            unit_start, unit_end = self._clamped_alignment_unit_bounds(
+                unit.input_start,
+                unit.input_end,
                 total_duration_sec,
             )
-            if chunk_start is None or chunk_end is None:
+            if unit_start is None or unit_end is None:
                 continue
 
             planner = WindowPlanner(
                 self.window_config,
-                anchor_resolver=self._chunk_anchor_resolver(chunk_start),
+                anchor_resolver=self._unit_anchor_resolver(unit_start),
             )
-            local_windows = planner.plan(chunk_end - chunk_start)
+            local_windows = planner.plan(unit_end - unit_start)
             for local_window in local_windows:
-                offset = chunk_start
+                offset = unit_start
                 windows.append(
                     AlignmentWindow(
                         index=len(windows),
@@ -240,13 +258,13 @@ class QwenMlxProvider:
                         core_end=local_window.core_end + offset,
                         context_start=local_window.context_start + offset,
                         context_end=local_window.context_end + offset,
-                        super_chunk_index=chunk.index,
+                        alignment_unit_index=unit.index,
                     )
                 )
         return windows
 
-    def _chunk_anchor_resolver(
-        self, chunk_start: float
+    def _unit_anchor_resolver(
+        self, unit_start: float
     ) -> Callable[[float, float, float], Optional[float]]:
         def resolve(
             target_split_sec: float,
@@ -254,31 +272,31 @@ class QwenMlxProvider:
             search_end_sec: float,
         ) -> Optional[float]:
             resolved = self._resolve_silence_anchor(
-                target_split_sec + chunk_start,
-                search_start_sec + chunk_start,
-                search_end_sec + chunk_start,
+                target_split_sec + unit_start,
+                search_start_sec + unit_start,
+                search_end_sec + unit_start,
             )
             if resolved is None:
                 return None
-            return resolved - chunk_start
+            return resolved - unit_start
 
         return resolve
 
-    def _clamped_super_chunk_bounds(
+    def _clamped_alignment_unit_bounds(
         self,
-        chunk_start: float,
-        chunk_end: float,
+        input_start: float,
+        input_end: float,
         total_duration_sec: float,
     ) -> tuple[float | None, float | None]:
         if not (
-            math.isfinite(chunk_start)
-            and math.isfinite(chunk_end)
+            math.isfinite(input_start)
+            and math.isfinite(input_end)
             and math.isfinite(total_duration_sec)
         ):
             return None, None
 
-        clamped_start = min(max(0.0, chunk_start), total_duration_sec)
-        clamped_end = min(max(0.0, chunk_end), total_duration_sec)
+        clamped_start = min(max(0.0, input_start), total_duration_sec)
+        clamped_end = min(max(0.0, input_end), total_duration_sec)
         if clamped_end <= clamped_start:
             return None, None
         return clamped_start, clamped_end
@@ -287,13 +305,13 @@ class QwenMlxProvider:
         return (
             speech_plan is not None
             and speech_plan.status == "ok"
-            and bool(speech_plan.super_chunks)
+            and bool(speech_plan.alignment_units)
         )
 
-    def _super_chunk_count(self, speech_plan: SpeechPlan | None) -> int:
+    def _alignment_unit_count(self, speech_plan: SpeechPlan | None) -> int:
         if speech_plan is None or speech_plan.status != "ok":
             return 0
-        return len(speech_plan.super_chunks)
+        return len(speech_plan.alignment_units)
 
     def _display_bounds_for_window(
         self,
@@ -304,27 +322,51 @@ class QwenMlxProvider:
     ) -> WindowDisplayBounds | None:
         if not self._uses_speech_plan(speech_plan):
             return None
-        if window.super_chunk_index is None:
+        if window.alignment_unit_index is None:
             return None
         assert speech_plan is not None
-        chunk = next(
+        unit = next(
             (
                 candidate
-                for candidate in speech_plan.super_chunks
-                if candidate.index == window.super_chunk_index
+                for candidate in speech_plan.alignment_units
+                if candidate.index == window.alignment_unit_index
             ),
             None,
         )
-        if chunk is None:
+        if unit is None:
             return None
         return WindowDisplayBounds(
-            start_time=max(0.0, chunk.speech_start - self.vad_display_lead_pad_sec),
+            start_time=max(0.0, unit.speech_start - self.vad_display_lead_pad_sec),
             end_time=min(
                 total_duration_sec,
-                chunk.speech_end + self.vad_display_tail_pad_sec,
+                unit.speech_end + self.vad_display_tail_pad_sec,
             ),
-            super_chunk_index=chunk.index,
+            alignment_unit_index=unit.index,
         )
+
+    def _speech_spans_for_window(
+        self,
+        window: AlignmentWindow,
+        *,
+        speech_plan: SpeechPlan | None,
+    ) -> List[SpeechSpan]:
+        if speech_plan is None or window.alignment_unit_index is None:
+            return []
+        unit = next(
+            (
+                candidate
+                for candidate in speech_plan.alignment_units
+                if candidate.index == window.alignment_unit_index
+            ),
+            None,
+        )
+        if unit is None:
+            return []
+        return [
+            span
+            for span in speech_plan.raw_spans
+            if span.end >= unit.input_start and span.start <= unit.input_end
+        ]
 
     def _transcribe_window(
         self,
@@ -332,6 +374,7 @@ class QwenMlxProvider:
         window: AlignmentWindow,
         *,
         display_bounds: WindowDisplayBounds | None = None,
+        speech_spans: List[SpeechSpan] | None = None,
     ) -> WindowRun:
         context_input = self._context_input_path(audio_path, window)
         context_kwargs = self._context_generate_kwargs(window)
@@ -357,6 +400,19 @@ class QwenMlxProvider:
                 aligner_tokens,
             ),
             clip_duration_sec=max(0.0, window.context_end - window.context_start),
+        )
+        (
+            downgraded_projected_tokens,
+            prefer_next_anchor_indexes,
+        ) = self._downgrade_suspicious_projected_tokens(
+            repaired_projected_tokens,
+            speech_spans=speech_spans or [],
+            window=window,
+        )
+        repaired_projected_tokens = repair_unmatched_timings(
+            downgraded_projected_tokens,
+            clip_duration_sec=max(0.0, window.context_end - window.context_start),
+            prefer_next_anchor_indexes=prefer_next_anchor_indexes,
         )
         timing_source_counts = self._timing_source_counts(repaired_projected_tokens)
         has_timing_anchor = timing_source_counts.get("aligner", 0) > 0
@@ -390,6 +446,7 @@ class QwenMlxProvider:
             timing_source_counts=timing_source_counts,
             has_timing_anchor=has_timing_anchor,
             display_bounds=display_bounds,
+            speech_spans=list(speech_spans or []),
         )
 
     def _execute_window(
@@ -400,10 +457,11 @@ class QwenMlxProvider:
         window_index: int,
         window_count: int,
         display_bounds: WindowDisplayBounds | None = None,
+        speech_spans: List[SpeechSpan] | None = None,
     ) -> WindowRun:
         meta = {"window_index": window_index, "window_count": window_count}
-        if window.super_chunk_index is not None:
-            meta["super_chunk_index"] = window.super_chunk_index
+        if window.alignment_unit_index is not None:
+            meta["alignment_unit_index"] = window.alignment_unit_index
         try:
             with observe_step(
                 self._observer,
@@ -417,12 +475,14 @@ class QwenMlxProvider:
                     audio_path,
                     window,
                     display_bounds=display_bounds,
+                    speech_spans=speech_spans,
                 )
         except Exception as exc:
             return WindowRun(
                 window=window,
                 error=str(exc),
                 display_bounds=display_bounds,
+                speech_spans=list(speech_spans or []),
             )
 
     def _evaluate_window_qualities(self, window_runs: List[WindowRun]) -> None:
@@ -491,13 +551,13 @@ class QwenMlxProvider:
         expected_index = window_runs[index].window.index + step
         if candidate.window.index != expected_index:
             return None
-        if not self._same_super_chunk_scope(window_runs[index], candidate):
+        if not self._same_alignment_unit_scope(window_runs[index], candidate):
             return None
 
         return candidate
 
-    def _same_super_chunk_scope(self, left: WindowRun, right: WindowRun) -> bool:
-        return left.window.super_chunk_index == right.window.super_chunk_index
+    def _same_alignment_unit_scope(self, left: WindowRun, right: WindowRun) -> bool:
+        return left.window.alignment_unit_index == right.window.alignment_unit_index
 
     def _raise_if_all_windows_failed(self, window_runs: List[WindowRun]) -> None:
         if any(window_run.error is None for window_run in window_runs):
@@ -682,6 +742,102 @@ class QwenMlxProvider:
             counts[projected.timing_source] = counts.get(projected.timing_source, 0) + 1
         return counts
 
+    def _downgrade_suspicious_projected_tokens(
+        self,
+        projected_tokens: List[ProjectedToken],
+        *,
+        speech_spans: List[SpeechSpan],
+        window: AlignmentWindow,
+    ) -> tuple[List[ProjectedToken], set[int]]:
+        if not projected_tokens:
+            return [], set()
+        context_duration = max(0.0, window.context_end - window.context_start)
+        local_spans: List[SpeechSpan] = []
+        for span in speech_spans:
+            start = min(context_duration, max(0.0, span.start - window.context_start))
+            end = min(context_duration, max(0.0, span.end - window.context_start))
+            if end <= start:
+                continue
+            local_spans.append(
+                SpeechSpan(start=start, end=end, confidence=span.confidence)
+            )
+        downgraded: List[ProjectedToken] = []
+        prefer_next_anchor_indexes: set[int] = set()
+        for index, projected in enumerate(projected_tokens):
+            token = projected.token
+            suspicious = (
+                projected.timing_source == "aligner"
+                and (
+                    token_has_suspicious_duration(token, self.timing_validation_policy)
+                    or token_crosses_non_speech_gap(token, local_spans)
+                )
+            )
+            if not suspicious:
+                downgraded.append(projected)
+                continue
+            if (
+                projected.transcript_index is not None
+                and self._should_repair_suspicious_token_from_next_anchor(
+                    projected_tokens,
+                    index,
+                )
+            ):
+                prefer_next_anchor_indexes.add(projected.transcript_index)
+            downgraded.append(
+                ProjectedToken(
+                    Token(
+                        text=token.text,
+                        start_time=0.0,
+                        end_time=0.0,
+                        unit=token.unit,
+                        language=token.language,
+                    ),
+                    "unresolved",
+                    projected.aligner_index,
+                    projected.transcript_index,
+                )
+            )
+        return downgraded, prefer_next_anchor_indexes
+
+    def _should_repair_suspicious_token_from_next_anchor(
+        self,
+        projected_tokens: List[ProjectedToken],
+        index: int,
+    ) -> bool:
+        next_projected = self._nearest_projected_with_timing(
+            projected_tokens,
+            start_index=index + 1,
+            step=1,
+        )
+        if next_projected is None:
+            return False
+        previous = self._nearest_projected_with_timing(
+            projected_tokens,
+            start_index=index - 1,
+            step=-1,
+        )
+        if previous is None:
+            return True
+        token = projected_tokens[index].token
+        if self._ends_segment(previous.token.text):
+            return True
+        return token.start_time - previous.token.end_time >= 1.0
+
+    def _nearest_projected_with_timing(
+        self,
+        projected_tokens: List[ProjectedToken],
+        *,
+        start_index: int,
+        step: int,
+    ) -> ProjectedToken | None:
+        index = start_index
+        while 0 <= index < len(projected_tokens):
+            projected = projected_tokens[index]
+            if projected.timing_source in {"aligner", "estimated"}:
+                return projected
+            index += step
+        return None
+
     def _offset_projected_tokens(
         self,
         projected_tokens: Iterable[ProjectedToken],
@@ -760,7 +916,7 @@ class QwenMlxProvider:
                 continue
 
             if window_run.quality is not None and window_run.quality.passed:
-                if passing_block and not self._same_super_chunk_scope(
+                if passing_block and not self._same_alignment_unit_scope(
                     passing_block[-1],
                     window_run,
                 ):
@@ -916,7 +1072,7 @@ class QwenMlxProvider:
         window_runs: List[WindowRun],
         segments: List[Segment],
         speech_plan_used: bool = False,
-        super_chunk_count: int = 0,
+        alignment_unit_count: int = 0,
     ) -> TranscriptionDocument:
         detected_language = next(
             (run.language for run in window_runs if run.language is not None),
@@ -930,7 +1086,7 @@ class QwenMlxProvider:
         )
         provider_metadata = {
             "processing_strategy": (
-                "vad_super_chunk_windowed_bounded_alignment"
+                "vad_alignment_unit_bounded_alignment"
                 if speech_plan_used
                 else "windowed_bounded_alignment"
             ),
@@ -945,7 +1101,7 @@ class QwenMlxProvider:
             ],
         }
         if speech_plan_used:
-            provider_metadata["super_chunk_count"] = super_chunk_count
+            provider_metadata["alignment_unit_count"] = alignment_unit_count
         document.ensure_source_media()["provider_metadata"] = provider_metadata
         return document
 
@@ -1055,8 +1211,8 @@ class QwenMlxProvider:
             "timing_source_counts": dict(window_run.timing_source_counts),
             "has_timing_anchor": window_run.has_timing_anchor,
         }
-        if window_run.window.super_chunk_index is not None:
-            diagnostic["super_chunk_index"] = window_run.window.super_chunk_index
+        if window_run.window.alignment_unit_index is not None:
+            diagnostic["alignment_unit_index"] = window_run.window.alignment_unit_index
         if window_run.display_bounds is not None:
             diagnostic["display_start"] = window_run.display_bounds.start_time
             diagnostic["display_end"] = window_run.display_bounds.end_time

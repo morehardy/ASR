@@ -1,7 +1,13 @@
 import unittest
 
 from asr.models import Token
+from asr.providers.timing_validation import (
+    TimingValidationPolicy,
+    token_crosses_non_speech_gap,
+    token_has_suspicious_duration,
+)
 from asr.providers.quality import QualityThresholds, evaluate_quality
+from asr.vad import SpeechSpan
 
 
 class QualityGateTest(unittest.TestCase):
@@ -146,3 +152,32 @@ class QualityGateTest(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertGreater(result.estimated_token_ratio, 0.30)
+
+    def test_short_word_with_long_duration_is_suspicious(self) -> None:
+        policy = TimingValidationPolicy()
+        token = Token("You'd", start_time=10484.52, end_time=10498.92, unit="word")
+
+        self.assertTrue(token_has_suspicious_duration(token, policy))
+
+    def test_normal_word_duration_is_not_suspicious(self) -> None:
+        policy = TimingValidationPolicy()
+        token = Token("better", start_time=10498.92, end_time=10499.08, unit="word")
+
+        self.assertFalse(token_has_suspicious_duration(token, policy))
+
+    def test_cjk_text_is_not_stripped_before_duration_validation(self) -> None:
+        policy = TimingValidationPolicy()
+        token = Token("你好", start_time=1.0, end_time=2.2, unit="word")
+
+        self.assertTrue(token_has_suspicious_duration(token, policy))
+
+    def test_token_crossing_vad_non_speech_gap_is_suspicious(self) -> None:
+        token = Token("You'd", start_time=10.5, end_time=14.2, unit="word")
+        speech_spans = [
+            SpeechSpan(start=10.0, end=11.0),
+            SpeechSpan(start=14.0, end=15.0),
+        ]
+
+        self.assertTrue(
+            token_crosses_non_speech_gap(token, speech_spans, tolerance_sec=0.10)
+        )
