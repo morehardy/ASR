@@ -176,9 +176,9 @@ def build_alignment_units(
         gap = span.start - current_end
         candidate_duration = max(span.end, current_end) - current_start
 
-        if (
-            gap <= config.merge_gap_sec
-            and candidate_duration <= config.max_alignment_unit_sec
+        if gap <= config.merge_gap_sec and (
+            gap <= 0.0
+            or candidate_duration <= config.max_alignment_unit_sec
         ):
             current.append(span)
             continue
