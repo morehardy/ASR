@@ -5,7 +5,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import asr
 from asr.cli import (
+    _version_callback,
     app,
     build_fish_completion_script,
     build_parser,
@@ -19,6 +21,32 @@ from asr.models import TranscriptionDocument
 class CliTyperBootstrapTest(unittest.TestCase):
     def test_app_symbol_is_available(self) -> None:
         self.assertTrue(callable(app))
+
+    @patch("asr.cli._run_transcription")
+    def test_version_option_prints_package_version_without_transcribing(
+        self,
+        mock_run_transcription,
+    ) -> None:
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            exit_code = main(["--version"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), f"easr {asr.__version__}\n")
+        mock_run_transcription.assert_not_called()
+
+    @patch("asr.cli._run_transcription")
+    def test_version_option_is_honored_after_inputs(self, mock_run_transcription) -> None:
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            exit_code = main(["demo.mov", "--version"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), f"easr {asr.__version__}\n")
+        mock_run_transcription.assert_not_called()
+
+    def test_version_callback_preserves_false_value(self) -> None:
+        self.assertIs(_version_callback(False), False)
 
     @patch("asr.cli.discover_cli_sources")
     @patch("asr.cli.run_environment_preflight")

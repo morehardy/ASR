@@ -15,6 +15,7 @@ from typing import Iterable, List, Literal, Sequence, Tuple
 import click
 import typer
 
+from asr import __version__
 from asr.discovery import discover_media_files
 from asr.exporters import render_json, render_srt, render_vtt
 from asr.media import FfmpegMediaPreparer
@@ -35,7 +36,7 @@ _MLX_RUNTIME_INSTALL_HINT = (
     "MLX runtime is not installed. Install with `pip install 'echoalign-asr-mlx[mlx]'` "
     "(published package) or `pip install '.[mlx]'` from a source checkout."
 )
-_ROOT_FLAG_OPTIONS = frozenset({"--recursive", "--verbose", "--no-vad"})
+_ROOT_FLAG_OPTIONS = frozenset({"--recursive", "--verbose", "--no-vad", "--version"})
 _ROOT_OPTIONS_WITH_VALUES = frozenset({"--output-dir", "--granularity"})
 
 app = typer.Typer(
@@ -43,6 +44,13 @@ app = typer.Typer(
     help="Extract subtitles and aligned timestamps from local audio and video.",
     add_completion=False,
 )
+
+
+def _version_callback(value: bool) -> bool:
+    if value:
+        print(f"easr {__version__}")
+        raise typer.Exit(code=0)
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -432,6 +440,13 @@ def root(
         False,
         "--no-vad",
         help="Disable voice activity detection preprocessing.",
+    ),
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the installed package version and exit.",
     ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
