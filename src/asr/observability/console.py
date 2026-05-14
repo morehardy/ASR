@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn
+
 from asr.observability.events import ObservabilityEvent
+
+_PROGRESS_BAR_WIDTH = 16
 
 
 @dataclass(slots=True)
@@ -20,9 +25,14 @@ class ConsoleProgressObserver:
     _current_index: int = field(default=0, init=False, repr=False)
     _current_total: int = field(default=0, init=False, repr=False)
     _current_name: str = field(default="", init=False, repr=False)
+    _current_window_index: int = field(default=0, init=False, repr=False)
+    _current_window_count: int = field(default=0, init=False, repr=False)
     _file_start_perf: float | None = field(default=None, init=False, repr=False)
     _last_width: int = field(default=0, init=False, repr=False)
     _reported_warning_codes: set[str] = field(default_factory=set, init=False, repr=False)
+    _console: Console | None = field(default=None, init=False, repr=False)
+    _progress: Progress | None = field(default=None, init=False, repr=False)
+    _progress_task_id: int | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.is_tty is None:
@@ -30,14 +40,22 @@ class ConsoleProgressObserver:
 
     def on_event(self, event: ObservabilityEvent) -> None:
         if event.event_type == "file_start":
+            self._stop_progress()
             self._current_index = int(event.meta.get("index", 0))
             self._current_total = int(event.meta.get("total", 0))
             self._current_name = Path(event.source_path or "").name
+            self._current_window_index = 0
+            self._current_window_count = 0
             self._file_start_perf = event.perf_counter
             self._write_line(self._with_elapsed("discover", event.perf_counter))
             return
 
         if event.event_type == "step_start":
+            if event.step == "provider_window":
+                self._record_window_progress(event)
+                self._write_window_progress(event.perf_counter)
+                return
+            self._stop_progress()
             self._write_line(self._with_elapsed(self._display_step(event), event.perf_counter))
             return
 
@@ -47,27 +65,121 @@ class ConsoleProgressObserver:
 
         if event.event_type == "file_end":
             status = str(event.meta.get("status", "ok"))
+            if self._current_window_count > 0:
+                if status == "ok":
+                    self._current_window_index = self._current_window_count
+                else:
+                    self._stop_progress()
+                    self._write_line(
+                        f"{status} | {self._window_progress_line(event.perf_counter)}",
+                        finalize=True,
+                    )
+                    return
+                self._write_window_progress(event.perf_counter)
+                self._stop_progress()
+                return
+            self._stop_progress()
             self._write_line(
                 self._with_elapsed(status, event.perf_counter),
                 finalize=True,
             )
 
     def close(self) -> None:
-        return None
+        self._stop_progress()
 
     def _display_step(self, event: ObservabilityEvent) -> str:
-        if event.step == "provider_window":
-            window_index = event.meta.get("window_index")
-            window_count = event.meta.get("window_count")
-            if window_index is not None and window_count is not None:
-                return f"transcribe (window {window_index}/{window_count})"
         return event.step or "step"
 
-    def _with_elapsed(self, label: str, perf_counter: float) -> str:
+    def _record_window_progress(self, event: ObservabilityEvent) -> None:
+        window_index = event.meta.get("window_index")
+        window_count = event.meta.get("window_count")
+        if isinstance(window_index, int):
+            self._current_window_index = max(0, window_index)
+        if isinstance(window_count, int):
+            self._current_window_count = max(0, window_count)
+
+    def _window_progress_line(self, perf_counter: float) -> str:
+        count = self._current_window_count
+        index = min(self._current_window_index, count) if count else self._current_window_index
+        return f"{self._progress_bar(index, count)} | {index}/{count} | {self._elapsed(perf_counter)}"
+
+    def _write_window_progress(self, perf_counter: float) -> None:
+        if not self.is_tty:
+            self._write_line(self._window_progress_line(perf_counter))
+            return
+
+        progress = self._ensure_progress()
+        count = self._current_window_count
+        total = max(1, count)
+        completed = min(self._current_window_index, total)
+        elapsed = self._elapsed(perf_counter)
+        if self._progress_task_id is None:
+            self._progress_task_id = progress.add_task(
+                self._current_name,
+                total=total,
+                completed=completed,
+                elapsed=elapsed,
+            )
+        else:
+            progress.update(
+                self._progress_task_id,
+                total=total,
+                completed=completed,
+                elapsed=elapsed,
+            )
+        progress.refresh()
+
+    def _ensure_progress(self) -> Progress:
+        if self._progress is None:
+            if self._last_width > 0:
+                self.stream.write("\n")
+                self.stream.flush()
+                self._last_width = 0
+            self._console = Console(
+                file=self.stream,
+                force_terminal=True,
+                no_color=True,
+                width=80,
+            )
+            self._progress = Progress(
+                TextColumn("{task.description}"),
+                BarColumn(bar_width=_PROGRESS_BAR_WIDTH),
+                TextColumn("{task.completed:.0f}/{task.total:.0f}"),
+                TextColumn("{task.fields[elapsed]}"),
+                console=self._console,
+                auto_refresh=False,
+                redirect_stdout=False,
+                redirect_stderr=False,
+                transient=False,
+            )
+            self._progress.start()
+            self._progress_task_id = None
+        return self._progress
+
+    def _stop_progress(self) -> None:
+        if self._progress is None:
+            return
+        self._progress.stop()
+        if self.is_tty:
+            self.stream.write("\n")
+            self.stream.flush()
+        self._progress = None
+        self._progress_task_id = None
+
+    def _progress_bar(self, index: int, count: int) -> str:
+        if count <= 0:
+            return "░" * _PROGRESS_BAR_WIDTH
+        filled = round((max(0, min(index, count)) / count) * _PROGRESS_BAR_WIDTH)
+        return ("█" * filled) + ("░" * (_PROGRESS_BAR_WIDTH - filled))
+
+    def _elapsed(self, perf_counter: float) -> str:
         if self._file_start_perf is None:
-            return label
+            return "0.0s"
         elapsed = max(0.0, perf_counter - self._file_start_perf)
-        return f"{label} | {elapsed:.1f}s"
+        return f"{elapsed:.1f}s"
+
+    def _with_elapsed(self, label: str, perf_counter: float) -> str:
+        return f"{label} | {self._elapsed(perf_counter)}"
 
     def _write_line(self, step: str, *, finalize: bool = False) -> None:
         line = f"[{self._current_index}/{self._current_total}] {self._current_name} | {step}"

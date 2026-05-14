@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rich.progress import Progress
+
 from asr.observability.console import ConsoleProgressObserver
 from asr.observability.events import ObservabilityEvent
 from asr.observability.metrics import MetricsCollectorObserver
@@ -134,7 +136,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         self.assertIn("prepare", output)
         self.assertIn("0.5s", output)
 
-    def test_provider_window_step_is_rendered_with_window_index(self) -> None:
+    def test_provider_window_step_renders_bar_count_and_elapsed_only(self) -> None:
         stream = io.StringIO()
         observer = ConsoleProgressObserver(stream=stream, is_tty=False)
         observer.on_event(
@@ -144,6 +146,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
                 file_id="1",
                 source_path="demo.wav",
                 meta={"index": 1, "total": 1},
+                perf_counter=10.0,
             )
         )
         observer.on_event(
@@ -154,11 +157,91 @@ class ConsoleProgressObserverTest(unittest.TestCase):
                 source_path="demo.wav",
                 step="provider_window",
                 meta={"window_index": 2, "window_count": 8},
+                perf_counter=12.5,
             )
         )
 
         output = stream.getvalue()
-        self.assertIn("transcribe (window 2/8)", output)
+        self.assertIn("2/8", output)
+        self.assertIn("2.5s", output)
+        self.assertIn("█", output)
+        self.assertIn("░", output)
+        self.assertNotIn("transcribe", output)
+        self.assertNotIn("window", output)
+
+    def test_tty_provider_window_uses_rich_progress(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=True)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+                perf_counter=10.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_window",
+                meta={"window_index": 3, "window_count": 8},
+                perf_counter=18.0,
+            )
+        )
+
+        self.assertIsInstance(observer._progress, Progress)
+        observer.close()
+        output = stream.getvalue()
+        self.assertGreaterEqual(output.count("demo.wav"), 2)
+        self.assertIn("3/8", output)
+        self.assertIn("8.0s", output)
+        self.assertNotIn("transcribe", output)
+        self.assertNotIn("window", output)
+
+    def test_file_end_finalizes_window_progress_bar(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=True)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+                perf_counter=10.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_window",
+                meta={"window_index": 7, "window_count": 8},
+                perf_counter=20.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_end",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"status": "ok"},
+                perf_counter=25.5,
+            )
+        )
+
+        output = stream.getvalue()
+        self.assertTrue(output.endswith("\n"))
+        self.assertIn("8/8", output)
+        self.assertIn("15.5s", output)
 
     def test_vad_missing_dependency_warning_is_rendered_once(self) -> None:
         stream = io.StringIO()
