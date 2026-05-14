@@ -136,7 +136,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         self.assertIn("prepare", output)
         self.assertIn("0.5s", output)
 
-    def test_provider_window_step_renders_bar_count_and_elapsed_only(self) -> None:
+    def test_provider_window_step_renders_thin_bar_percent_and_elapsed(self) -> None:
         stream = io.StringIO()
         observer = ConsoleProgressObserver(stream=stream, is_tty=False)
         observer.on_event(
@@ -156,16 +156,18 @@ class ConsoleProgressObserverTest(unittest.TestCase):
                 file_id="1",
                 source_path="demo.wav",
                 step="provider_window",
-                meta={"window_index": 2, "window_count": 8},
-                perf_counter=12.5,
+                meta={"window_index": 3, "window_count": 8},
+                perf_counter=52.0,
             )
         )
 
         output = stream.getvalue()
-        self.assertIn("2/8", output)
-        self.assertIn("2.5s", output)
-        self.assertIn("█", output)
-        self.assertIn("░", output)
+        self.assertIn("[1/1] demo.wav", output)
+        self.assertIn("38%", output)
+        self.assertIn("00:42", output)
+        self.assertIn("━", output)
+        self.assertIn("─", output)
+        self.assertNotIn("3/8", output)
         self.assertNotIn("transcribe", output)
         self.assertNotIn("window", output)
 
@@ -190,7 +192,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
                 source_path="demo.wav",
                 step="provider_window",
                 meta={"window_index": 3, "window_count": 8},
-                perf_counter=18.0,
+                perf_counter=52.0,
             )
         )
 
@@ -199,8 +201,11 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         output = stream.getvalue()
         self.assertGreaterEqual(output.count("[1/1] demo.wav"), 2)
         self.assertGreaterEqual(output.count("demo.wav"), 2)
-        self.assertIn("3/8", output)
-        self.assertIn("8.0s", output)
+        self.assertIn("38%", output)
+        self.assertIn("00:42", output)
+        self.assertIn("━", output)
+        self.assertIn("─", output)
+        self.assertNotIn("3/8", output)
         self.assertNotIn("transcribe", output)
         self.assertNotIn("window", output)
 
@@ -240,9 +245,9 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         )
 
         output = stream.getvalue()
-        self.assertTrue(output.endswith("\n"))
-        self.assertIn("8/8", output)
-        self.assertIn("15.5s", output)
+        self.assertIn("100%", output)
+        self.assertIn("00:15", output)
+        self.assertNotIn("8/8", output)
         self.assertEqual(observer._last_width, 0)
 
     def test_vad_missing_dependency_warning_is_rendered_once(self) -> None:

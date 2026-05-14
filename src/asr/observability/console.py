@@ -8,11 +8,26 @@ from pathlib import Path
 from typing import TextIO
 
 from rich.console import Console
-from rich.progress import BarColumn, Progress, TextColumn
+from rich.progress import Progress, ProgressColumn, Task, TextColumn
+from rich.text import Text
 
 from asr.observability.events import ObservabilityEvent
 
-_PROGRESS_BAR_WIDTH = 16
+_PROGRESS_BAR_WIDTH = 20
+
+
+class _ThinProgressBarColumn(ProgressColumn):
+    """Render a full-length thin progress track."""
+
+    def render(self, task: Task) -> Text:
+        total = max(1.0, float(task.total or 1.0))
+        completed = max(0.0, min(float(task.completed), total))
+        filled = int((completed / total) * _PROGRESS_BAR_WIDTH + 0.5)
+        empty = _PROGRESS_BAR_WIDTH - filled
+        bar = Text()
+        bar.append("━" * filled, style="cyan")
+        bar.append("─" * empty, style="dim white")
+        return bar
 
 
 @dataclass(slots=True)
@@ -101,7 +116,11 @@ class ConsoleProgressObserver:
     def _window_progress_line(self, perf_counter: float) -> str:
         count = self._current_window_count
         index = min(self._current_window_index, count) if count else self._current_window_index
-        return f"{self._progress_bar(index, count)} | {index}/{count} | {self._elapsed(perf_counter)}"
+        return (
+            f"{self._progress_bar(index, count)} | "
+            f"{self._progress_percent(index, count)} | "
+            f"{self._progress_elapsed(perf_counter)}"
+        )
 
     def _write_window_progress(self, perf_counter: float) -> None:
         if not self.is_tty:
@@ -112,13 +131,15 @@ class ConsoleProgressObserver:
         count = self._current_window_count
         total = max(1, count)
         completed = min(self._current_window_index, total)
-        elapsed = self._elapsed(perf_counter)
+        elapsed = self._progress_elapsed(perf_counter)
+        percent = self._progress_percent(self._current_window_index, count)
         if self._progress_task_id is None:
             self._progress_task_id = progress.add_task(
                 self._progress_description(),
                 total=total,
                 completed=completed,
                 elapsed=elapsed,
+                percent=percent,
             )
         else:
             progress.update(
@@ -126,6 +147,7 @@ class ConsoleProgressObserver:
                 total=total,
                 completed=completed,
                 elapsed=elapsed,
+                percent=percent,
             )
         progress.refresh()
 
@@ -138,12 +160,11 @@ class ConsoleProgressObserver:
             self._console = Console(
                 file=self.stream,
                 force_terminal=True,
-                no_color=True,
             )
             self._progress = Progress(
                 TextColumn("{task.description}"),
-                BarColumn(bar_width=_PROGRESS_BAR_WIDTH),
-                TextColumn("{task.completed:.0f}/{task.total:.0f}"),
+                _ThinProgressBarColumn(),
+                TextColumn("{task.fields[percent]}"),
                 TextColumn("{task.fields[elapsed]}"),
                 console=self._console,
                 auto_refresh=False,
@@ -160,8 +181,6 @@ class ConsoleProgressObserver:
             return
         self._progress.stop()
         if self.is_tty:
-            self.stream.write("\n")
-            self.stream.flush()
             self._last_width = 0
         self._progress = None
         self._progress_task_id = None
@@ -171,9 +190,26 @@ class ConsoleProgressObserver:
 
     def _progress_bar(self, index: int, count: int) -> str:
         if count <= 0:
-            return "░" * _PROGRESS_BAR_WIDTH
-        filled = round((max(0, min(index, count)) / count) * _PROGRESS_BAR_WIDTH)
-        return ("█" * filled) + ("░" * (_PROGRESS_BAR_WIDTH - filled))
+            return "─" * _PROGRESS_BAR_WIDTH
+        filled = int((max(0, min(index, count)) / count) * _PROGRESS_BAR_WIDTH + 0.5)
+        return ("━" * filled) + ("─" * (_PROGRESS_BAR_WIDTH - filled))
+
+    def _progress_percent(self, index: int, count: int) -> str:
+        if count <= 0:
+            return "0%"
+        bounded = max(0, min(index, count))
+        percent = int((bounded / count) * 100 + 0.5)
+        return f"{percent}%"
+
+    def _progress_elapsed(self, perf_counter: float) -> str:
+        if self._file_start_perf is None:
+            return "00:00"
+        elapsed = int(max(0.0, perf_counter - self._file_start_perf))
+        minutes, seconds = divmod(elapsed, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
 
     def _elapsed(self, perf_counter: float) -> str:
         if self._file_start_perf is None:
