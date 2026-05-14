@@ -133,8 +133,144 @@ class ConsoleProgressObserverTest(unittest.TestCase):
 
         output = stream.getvalue()
         self.assertIn("[1/2]", output)
-        self.assertIn("prepare", output)
+        self.assertIn("preparing audio", output)
         self.assertIn("0.5s", output)
+
+    def test_default_console_hides_internal_step_names(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=False)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+                perf_counter=10.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="transcribe",
+                perf_counter=11.0,
+            )
+        )
+
+        for offset, step in enumerate(
+            ["provider_plan_windows", "provider_merge", "write_outputs"],
+            start=2,
+        ):
+            observer.on_event(
+                ObservabilityEvent(
+                    event_type="step_start",
+                    run_id="run-1",
+                    file_id="1",
+                    source_path="demo.wav",
+                    step=step,
+                    perf_counter=10.0 + offset,
+                )
+            )
+
+        output = stream.getvalue()
+        self.assertIn("transcribing", output)
+        self.assertNotIn("provider_plan_windows", output)
+        self.assertNotIn("provider_merge", output)
+        self.assertNotIn("write_outputs", output)
+
+    def test_default_console_hides_unknown_steps(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=False)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+                perf_counter=10.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_tokenize",
+                perf_counter=11.0,
+            )
+        )
+
+        self.assertNotIn("provider_tokenize", stream.getvalue())
+
+    def test_hidden_step_after_rich_progress_displays_finalizing(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=True)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+                perf_counter=10.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_window",
+                meta={"window_index": 7, "window_count": 8},
+                perf_counter=20.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_merge",
+                perf_counter=21.0,
+            )
+        )
+
+        output = stream.getvalue()
+        self.assertIn("finalizing", output)
+        self.assertNotIn("provider_merge", output)
+
+    def test_verbose_console_keeps_internal_step_names(self) -> None:
+        stream = io.StringIO()
+        observer = ConsoleProgressObserver(stream=stream, is_tty=False, verbose=True)
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="file_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                meta={"index": 1, "total": 1},
+                perf_counter=10.0,
+            )
+        )
+        observer.on_event(
+            ObservabilityEvent(
+                event_type="step_start",
+                run_id="run-1",
+                file_id="1",
+                source_path="demo.wav",
+                step="provider_plan_windows",
+                perf_counter=11.0,
+            )
+        )
+
+        self.assertIn("provider_plan_windows", stream.getvalue())
 
     def test_provider_window_step_renders_thin_bar_percent_and_elapsed(self) -> None:
         stream = io.StringIO()
@@ -209,7 +345,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         self.assertNotIn("transcribe", output)
         self.assertNotIn("window", output)
 
-    def test_file_end_finalizes_window_progress_bar(self) -> None:
+    def test_file_end_after_window_progress_prints_done_once(self) -> None:
         stream = io.StringIO()
         observer = ConsoleProgressObserver(stream=stream, is_tty=True)
         observer.on_event(
@@ -245,8 +381,9 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         )
 
         output = stream.getvalue()
-        self.assertIn("100%", output)
-        self.assertIn("00:15", output)
+        self.assertIn("done", output)
+        self.assertNotIn("100%", output)
+        self.assertEqual(output.count("00:15"), 0)
         self.assertNotIn("8/8", output)
         self.assertEqual(observer._last_width, 0)
 

@@ -1,7 +1,10 @@
+import os
 import subprocess
+import sys
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from asr.models import Segment, Token
 from asr.observability.events import ObservabilityEvent
@@ -1192,6 +1195,59 @@ class QwenProviderWindowedTest(unittest.TestCase):
 
 
 class QwenProviderObservabilityTest(unittest.TestCase):
+    def test_model_download_progress_is_disabled_by_default(self) -> None:
+        provider = QwenMlxProvider()
+        disable_progress_bars = Mock()
+        hub_module = types.ModuleType("huggingface_hub")
+        utils_module = types.ModuleType("huggingface_hub.utils")
+        utils_module.disable_progress_bars = disable_progress_bars
+        hub_module.utils = utils_module
+
+        with patch.dict(
+            sys.modules,
+            {
+                "huggingface_hub": hub_module,
+                "huggingface_hub.utils": utils_module,
+            },
+        ), patch.dict(os.environ, {}, clear=True):
+            provider._suppress_model_download_progress()
+
+            self.assertEqual(os.environ["HF_HUB_DISABLE_PROGRESS_BARS"], "1")
+        disable_progress_bars.assert_called_once_with()
+
+    def test_model_download_progress_respects_explicit_enable(self) -> None:
+        provider = QwenMlxProvider()
+        disable_progress_bars = Mock()
+        hub_module = types.ModuleType("huggingface_hub")
+        utils_module = types.ModuleType("huggingface_hub.utils")
+        utils_module.disable_progress_bars = disable_progress_bars
+        hub_module.utils = utils_module
+
+        with patch.dict(
+            sys.modules,
+            {
+                "huggingface_hub": hub_module,
+                "huggingface_hub.utils": utils_module,
+            },
+        ), patch.dict(os.environ, {"HF_HUB_DISABLE_PROGRESS_BARS": "0"}, clear=True):
+            provider._suppress_model_download_progress()
+
+            self.assertEqual(os.environ["HF_HUB_DISABLE_PROGRESS_BARS"], "0")
+        disable_progress_bars.assert_not_called()
+
+    def test_model_download_progress_is_suppressed_only_while_loading_models(self) -> None:
+        provider = QwenMlxProvider()
+        provider._probe_duration_sec = lambda _: 0.0
+        provider._plan_windows = lambda total_duration_sec, speech_plan=None: []
+        model = FakeModel([])
+        provider._load_backend = lambda: (lambda model_id: model)
+
+        with patch.object(provider, "_suppress_model_download_progress") as suppress:
+            provider.transcribe(Path("demo.wav"))
+            provider.transcribe(Path("demo.wav"))
+
+        self.assertEqual(suppress.call_count, 1)
+
     def test_provider_emits_window_and_merge_steps(self) -> None:
         provider = QwenMlxProvider()
         provider._probe_duration_sec = lambda _: 140.0

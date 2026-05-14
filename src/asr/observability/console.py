@@ -14,6 +14,22 @@ from rich.text import Text
 from asr.observability.events import ObservabilityEvent
 
 _PROGRESS_BAR_WIDTH = 20
+_QUIET_STEP_LABELS = {
+    "preflight": "checking environment",
+    "prepare": "preparing audio",
+    "preprocess_vad": "detecting speech",
+    "transcribe": "transcribing",
+}
+_QUIET_FINALIZING_STEPS = frozenset(
+    {
+        "provider_merge",
+        "render_srt",
+        "render_vtt",
+        "render_json",
+        "write_outputs",
+    }
+)
+_STATUS_LABELS = {"ok": "done"}
 
 
 class _ThinProgressBarColumn(ProgressColumn):
@@ -37,6 +53,7 @@ class ConsoleProgressObserver:
     stream: TextIO = field(default_factory=lambda: sys.stdout)
     warning_stream: TextIO = field(default_factory=lambda: sys.stderr)
     is_tty: bool | None = None
+    verbose: bool = False
     _current_index: int = field(default=0, init=False, repr=False)
     _current_total: int = field(default=0, init=False, repr=False)
     _current_name: str = field(default="", init=False, repr=False)
@@ -48,6 +65,7 @@ class ConsoleProgressObserver:
     _console: Console | None = field(default=None, init=False, repr=False)
     _progress: Progress | None = field(default=None, init=False, repr=False)
     _progress_task_id: int | None = field(default=None, init=False, repr=False)
+    _quiet_phase: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.is_tty is None:
@@ -62,15 +80,21 @@ class ConsoleProgressObserver:
             self._current_window_index = 0
             self._current_window_count = 0
             self._file_start_perf = event.perf_counter
+            self._quiet_phase = None
             self._write_line(self._with_elapsed("discover", event.perf_counter))
             return
 
         if event.event_type == "step_start":
             if event.step == "provider_window":
+                self._quiet_phase = None
                 self._record_window_progress(event)
                 self._write_window_progress(event.perf_counter)
                 return
+            if not self._should_display_step(event):
+                self._handle_hidden_step(event)
+                return
             self._stop_progress()
+            self._quiet_phase = None
             self._write_line(self._with_elapsed(self._display_step(event), event.perf_counter))
             return
 
@@ -80,30 +104,41 @@ class ConsoleProgressObserver:
 
         if event.event_type == "file_end":
             status = str(event.meta.get("status", "ok"))
-            if self._current_window_count > 0:
-                if status == "ok":
-                    self._current_window_index = self._current_window_count
-                else:
-                    self._stop_progress()
-                    self._write_line(
-                        f"{status} | {self._window_progress_line(event.perf_counter)}",
-                        finalize=True,
-                    )
-                    return
-                self._write_window_progress(event.perf_counter)
-                self._stop_progress()
-                return
             self._stop_progress()
             self._write_line(
-                self._with_elapsed(status, event.perf_counter),
+                self._with_elapsed(self._display_status(status), event.perf_counter),
                 finalize=True,
             )
 
     def close(self) -> None:
         self._stop_progress()
 
+    def _should_display_step(self, event: ObservabilityEvent) -> bool:
+        if self.verbose:
+            return True
+        return event.step in _QUIET_STEP_LABELS
+
+    def _handle_hidden_step(self, event: ObservabilityEvent) -> None:
+        if (
+            not self.verbose
+            and event.step in _QUIET_FINALIZING_STEPS
+            and self._progress is not None
+        ):
+            self._stop_progress()
+            if self._quiet_phase != "finalizing":
+                self._quiet_phase = "finalizing"
+                self._write_line(self._with_elapsed("finalizing", event.perf_counter))
+            return
+        self._stop_progress()
+
     def _display_step(self, event: ObservabilityEvent) -> str:
-        return event.step or "step"
+        step = event.step or "step"
+        if self.verbose:
+            return step
+        return _QUIET_STEP_LABELS.get(step, step)
+
+    def _display_status(self, status: str) -> str:
+        return _STATUS_LABELS.get(status, status)
 
     def _record_window_progress(self, event: ObservabilityEvent) -> None:
         window_index = event.meta.get("window_index")
@@ -180,8 +215,6 @@ class ConsoleProgressObserver:
         if self._progress is None:
             return
         self._progress.stop()
-        if self.is_tty:
-            self._last_width = 0
         self._progress = None
         self._progress_task_id = None
 
@@ -225,8 +258,8 @@ class ConsoleProgressObserver:
         if self.is_tty:
             tail = "\n" if finalize else ""
             padded = line.ljust(self._last_width)
-            self._last_width = max(self._last_width, len(line))
             self.stream.write(f"\r{padded}{tail}")
+            self._last_width = 0 if finalize else max(self._last_width, len(line))
         else:
             self.stream.write(line + "\n")
         self.stream.flush()

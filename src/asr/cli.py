@@ -238,7 +238,7 @@ def _run_transcription(
 ) -> int:
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     collector = MetricsCollectorObserver() if verbose else None
-    observers = [ConsoleProgressObserver()]
+    observers = [ConsoleProgressObserver(verbose=verbose)]
     if collector is not None:
         observers.append(collector)
     observer = ObserverMux(
