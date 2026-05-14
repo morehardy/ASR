@@ -115,7 +115,7 @@ class ConsoleProgressObserver:
         elapsed = self._elapsed(perf_counter)
         if self._progress_task_id is None:
             self._progress_task_id = progress.add_task(
-                self._current_name,
+                self._progress_description(),
                 total=total,
                 completed=completed,
                 elapsed=elapsed,
@@ -139,7 +139,6 @@ class ConsoleProgressObserver:
                 file=self.stream,
                 force_terminal=True,
                 no_color=True,
-                width=80,
             )
             self._progress = Progress(
                 TextColumn("{task.description}"),
@@ -163,8 +162,12 @@ class ConsoleProgressObserver:
         if self.is_tty:
             self.stream.write("\n")
             self.stream.flush()
+            self._last_width = 0
         self._progress = None
         self._progress_task_id = None
+
+    def _progress_description(self) -> str:
+        return f"[{self._current_index}/{self._current_total}] {self._current_name}"
 
     def _progress_bar(self, index: int, count: int) -> str:
         if count <= 0:

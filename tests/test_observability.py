@@ -197,6 +197,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         self.assertIsInstance(observer._progress, Progress)
         observer.close()
         output = stream.getvalue()
+        self.assertGreaterEqual(output.count("[1/1] demo.wav"), 2)
         self.assertGreaterEqual(output.count("demo.wav"), 2)
         self.assertIn("3/8", output)
         self.assertIn("8.0s", output)
@@ -242,6 +243,7 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         self.assertTrue(output.endswith("\n"))
         self.assertIn("8/8", output)
         self.assertIn("15.5s", output)
+        self.assertEqual(observer._last_width, 0)
 
     def test_vad_missing_dependency_warning_is_rendered_once(self) -> None:
         stream = io.StringIO()
