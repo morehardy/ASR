@@ -181,22 +181,12 @@ class ConsoleProgressObserver:
             return
         self._progress.stop()
         if self.is_tty:
-            if not self._stream_ends_with_newline():
-                self.stream.write("\n")
-                self.stream.flush()
             self._last_width = 0
         self._progress = None
         self._progress_task_id = None
 
     def _progress_description(self) -> str:
         return f"[{self._current_index}/{self._current_total}] {self._current_name}"
-
-    def _stream_ends_with_newline(self) -> bool:
-        getvalue = getattr(self.stream, "getvalue", None)
-        if not callable(getvalue):
-            return False
-        value = str(getvalue())
-        return value.endswith("\n")
 
     def _progress_bar(self, index: int, count: int) -> str:
         if count <= 0:

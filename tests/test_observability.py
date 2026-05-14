@@ -245,7 +245,6 @@ class ConsoleProgressObserverTest(unittest.TestCase):
         )
 
         output = stream.getvalue()
-        self.assertTrue(output.endswith("\n"))
         self.assertIn("100%", output)
         self.assertIn("00:15", output)
         self.assertNotIn("8/8", output)
