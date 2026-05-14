@@ -258,6 +258,7 @@ wheels = [
 name = "echoalign-asr-mlx"
 source = { editable = "." }
 dependencies = [
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -271,6 +272,7 @@ mlx = [
 [package.metadata]
 requires-dist = [
     { name = "mlx-audio", marker = "extra == 'mlx'", specifier = ">=0.3.1" },
+    { name = "rich", specifier = ">=14.0,<15.0" },
     { name = "silero-vad", marker = "extra == 'mlx'", specifier = ">=6.2.1,<7" },
     { name = "torchcodec", marker = "extra == 'mlx'", specifier = ">=0.11.1" },
     { name = "typer", specifier = ">=0.16,<1.0" },
