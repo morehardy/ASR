@@ -592,13 +592,13 @@ class QwenMlxProvider:
 
     def _suppress_model_download_progress(self) -> None:
         flag = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
-        if flag is None:
-            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            explicitly_enabled = False
-        else:
-            explicitly_enabled = flag.strip().lower() in {"0", "false", "off", "no"}
-        if explicitly_enabled:
+        if (
+            flag is not None
+            and flag.strip().lower() in {"0", "false", "off", "no"}
+        ):
             return
+
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
         try:
             from huggingface_hub.utils import disable_progress_bars
