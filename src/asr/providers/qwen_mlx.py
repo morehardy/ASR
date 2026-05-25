@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import shutil
 import subprocess
 import tempfile
@@ -115,9 +116,7 @@ class QwenMlxProvider:
         audio_path: Path,
         speech_plan: SpeechPlan | None = None,
     ) -> TranscriptionDocument:
-        load = self._load_backend()
-        self._asr_model = self._asr_model or load(self.asr_model_id)
-        self._aligner_model = self._aligner_model or load(self.aligner_model_id)
+        self._ensure_models_loaded()
 
         with observe_step(
             self._observer,
@@ -579,6 +578,33 @@ class QwenMlxProvider:
                 "(published package) or `pip install '.[mlx]'` from a source checkout."
             ) from exc
         return load
+
+    def _ensure_models_loaded(self) -> None:
+        if self._asr_model is not None and self._aligner_model is not None:
+            return
+
+        self._suppress_model_download_progress()
+        load = self._load_backend()
+        if self._asr_model is None:
+            self._asr_model = load(self.asr_model_id)
+        if self._aligner_model is None:
+            self._aligner_model = load(self.aligner_model_id)
+
+    def _suppress_model_download_progress(self) -> None:
+        flag = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
+        if (
+            flag is not None
+            and flag.strip().lower() in {"0", "false", "off", "no"}
+        ):
+            return
+
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+        try:
+            from huggingface_hub.utils import disable_progress_bars
+        except ImportError:
+            return
+        disable_progress_bars()
 
     def _probe_duration_sec(self, audio_path: Path) -> float:
         return probe_duration_sec(audio_path)

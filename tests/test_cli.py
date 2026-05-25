@@ -281,6 +281,35 @@ class CliObservabilityIntegrationTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(mock_console_observer.called)
+        self.assertFalse(mock_console_observer.call_args.kwargs["verbose"])
+
+    @patch("asr.cli.ConsoleProgressObserver")
+    @patch("asr.cli.discover_cli_sources")
+    @patch("asr.cli.run_environment_preflight")
+    @patch("asr.cli.process_media_file")
+    def test_main_passes_verbose_to_console_progress(
+        self,
+        mock_process,
+        mock_preflight,
+        mock_discover,
+        mock_console_observer,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "demo.mov"
+            source.write_text("x", encoding="utf-8")
+            output_root = Path(tmp) / "outputs"
+            mock_discover.return_value = [(source, Path(tmp))]
+            mock_preflight.return_value = (True, "")
+            mock_process.return_value = TranscriptionDocument(
+                source_path=str(source.with_suffix(".wav")),
+                provider_name="fake",
+                segments=[],
+            )
+
+            exit_code = main([str(source), "--verbose", "--output-dir", str(output_root)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(mock_console_observer.call_args.kwargs["verbose"])
 
     @patch("asr.cli.discover_cli_sources")
     @patch("asr.cli.run_environment_preflight")
