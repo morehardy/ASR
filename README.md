@@ -1,32 +1,48 @@
+<p align="center">
+  <img src="docs/assets/asr-logo.png" alt="echoalign-asr-mlx logo" width="720">
+</p>
+
 # echoalign-asr-mlx
 
-`easr` is a local CLI for extracting subtitles and aligned timestamps from audio/video files.
+`easr` is a local Apple Silicon CLI that turns audio and video files into
+subtitle files (`.srt`, `.vtt`) and timestamp-aligned JSON.
 
-It currently targets `macOS + Apple Silicon` and uses an MLX-based provider (`Qwen3-ASR + Qwen3-ForcedAligner`) behind a stable CLI interface.
+Use it when you want local transcription, readable subtitles, and
+machine-friendly alignment data without running a server.
 
-## Current Status
+Current scope:
 
-The project is implemented and runnable.
+- runtime target: macOS on Apple Silicon
+- backend: MLX with Qwen3 ASR and Qwen3 ForcedAligner
+- output: SRT, WebVTT, and JSON
+- not included yet: translation, speaker diarization, Linux/Windows support
 
-Current capabilities:
+## What You Get
 
-- local file and directory processing
-- audio/video normalization to mono 16 kHz WAV
-- sentence-level and token-level export views
-- subtitle export to `srt` and `vtt`
-- rich JSON export (segments, tokens, provider metadata)
-- windowed transcription/alignment pipeline with diagnostics
+For each supported media file, `easr` writes:
 
-## Environment Requirements
+- `<name>.srt` for subtitle players and editors
+- `<name>.vtt` for web video workflows
+- `<name>.json` for downstream tools that need segments, tokens, timestamps,
+  language metadata, and provider metadata
+- `<name>.metrics.json` when `--verbose` is enabled
 
-- OS: `macOS` on `Apple Silicon`
-- Python: `>=3.14,<3.15`
-- package installer: `pip` or `uv pip`
-- build tooling: `uv` (recommended)
-- system dependencies on `PATH`:
-  - `ffmpeg`
-  - `ffprobe`
-- network access on first run (model download from Hugging Face)
+`easr` accepts files, directories, and glob patterns. Directory scans are
+non-recursive by default, and recursive processing is opt-in with `--recursive`.
+
+## Requirements
+
+- macOS on Apple Silicon
+- Python `>=3.14,<3.15`
+- `ffmpeg` and `ffprobe` available on `PATH`
+- `uv` if you run from a source checkout
+- network access on first run so the models can be downloaded from Hugging Face
+
+Install the media tools with Homebrew:
+
+```bash
+brew install ffmpeg
+```
 
 Default provider models:
 
@@ -35,178 +51,71 @@ Default provider models:
 
 ## Installation
 
-1. Install `ffmpeg` and `ffprobe` with your package manager.
-2. Install package dependencies with MLX extra.
-
-```bash
-python3.14 -m pip install ".[mlx]"
-```
-
-Alternative (`uv`-managed environment in project root):
-
-```bash
-uv sync --extra mlx
-```
-
-3. Verify CLI is available.
-
-```bash
-easr --help
-```
-
-If you are using `uv sync` in the project checkout without installing into an active shell
-environment, run through `uv`:
-
-```bash
-uv run --python 3.14 --extra mlx easr --help
-```
-
-## Python Package Distribution
-
-Build source + wheel artifacts:
-
-```bash
-uv build
-```
-
-The package version is derived from Git tags. A clean release build from tag
-`v0.2.1` produces `0.2.1` distributions.
-
-Install wheel in a target environment:
-
-```bash
-python3.14 -m pip install dist/echoalign_asr_mlx-<version>-py3-none-any.whl
-```
-
-For full transcription runtime, install with MLX extra:
-
-```bash
-python3.14 -m pip install ".[mlx]"
-```
-
-After publishing to an index (for example PyPI), end users can install with:
+Install from a published Python package:
 
 ```bash
 python3.14 -m pip install "echoalign-asr-mlx[mlx]"
+easr --help
 ```
 
-## GitHub Release to PyPI
+Run from a source checkout:
 
-This repository includes a publish workflow at:
+```bash
+uv sync --extra mlx
+uv run --python 3.14 --extra mlx easr --help
+```
 
-- `.github/workflows/publish-pypi.yml`
-
-Release flow:
-
-1. Configure a Trusted Publisher in PyPI for this project:
-   - project: `echoalign-asr-mlx`
-   - owner/repo: your GitHub repository
-   - workflow: `publish-pypi.yml`
-   - environment: `pypi`
-2. Merge release-ready code to `main`.
-3. Create and publish a GitHub Release tagged `vX.Y.Z`, for example `v0.2.1`.
-4. GitHub Actions runs tests, builds distributions with the tag-derived version,
-   checks them with Twine, and publishes to PyPI.
-
-The workflow also supports manual trigger with `workflow_dispatch`, but manual
-publishing must run from a release tag such as `v0.2.1`.
-
-## Quick Start
-
-The examples below use the installed `easr` command directly. If you are running from a
-project checkout with `uv sync`, prefix commands with:
+If you use the source checkout flow, prefix examples in this README with:
 
 ```bash
 uv run --python 3.14 --extra mlx easr ...
 ```
 
-### Single file
+## Quick Start
+
+Transcribe one file:
 
 ```bash
-easr ./demo.mp4 --verbose
+easr ./demo.mp4
 ```
 
-### No input path (defaults to current directory)
+Write outputs to a custom directory:
 
 ```bash
-easr
+easr ./demo.mp4 --output-dir ./subtitles
 ```
 
-### Directory (non-recursive by default)
+Process a directory:
 
 ```bash
 easr ./media
 ```
 
-### Directory (recursive)
+Process a directory recursively:
 
 ```bash
-easr ./media --recursive --verbose
+easr ./media --recursive
 ```
 
-### Glob pattern input
+Process a glob pattern:
 
 ```bash
-easr "./media/**/*.mp4" --recursive --verbose
+easr "./media/**/*.mp4" --recursive
 ```
 
-## CLI Reference
-
-Help output:
-
-```text
-usage: easr [-h] [--recursive] [--output-dir OUTPUT_DIR]
-           [--granularity {sentence,token}] [--no-vad] [--verbose]
-           [inputs ...]
-```
-
-Arguments and flags:
-
-- `inputs`: file, directory, or glob pattern; defaults to current directory if omitted
-- `--recursive`: recurse when scanning directory inputs
-- `--output-dir`: override default output root
-- `--granularity {sentence,token}`:
-  - `sentence`: subtitle entries come from segment boundaries
-  - `token`: subtitle/JSON `items` are generated from tokens
-- `--no-vad`: disable voice activity detection preprocessing
-- `--verbose`: print detailed per-step timing and export `<name>.metrics.json`
-
-### VAD preprocessing
-
-VAD preprocessing is enabled by default. `easr` first scans prepared audio with
-Silero VAD to find high-recall speech candidates, merges them into padded
-super-chunks, and asks the provider to process only those ranges. Final subtitle
-timestamps remain on the original media timeline.
-
-Use `--no-vad` to restore full-duration provider processing:
+Export token-level subtitle and JSON views:
 
 ```bash
-uv run --python 3.14 --extra mlx easr ./demo.mp4 --no-vad
+easr ./demo.mp4 --granularity token
 ```
 
-If VAD fails, transcription falls back to the full-duration provider path. If VAD
-successfully finds no speech, `easr` writes successful empty subtitle outputs.
-
-## Shell Completion (fish)
-
-Generate fish completion script:
+Show detailed progress and write metrics:
 
 ```bash
-easr completion fish
+easr ./demo.mp4 --verbose
 ```
 
-Install fish completion script:
-
-```bash
-easr completion install fish
-```
-
-Install target path:
-
-- `~/.config/fish/completions/easr.fish`
-- existing file is overwritten on install
-
-## Supported Input Formats
+## Supported Formats
 
 Audio:
 
@@ -224,27 +133,21 @@ Video:
 - `mkv`
 - `webm`
 
-## Output Files and Layout
+## Output Layout
 
-For each input media file, the CLI writes:
+Default output directory name: `outputs`.
 
-- `<name>.srt`
-- `<name>.vtt`
-- `<name>.json`
-- `<name>.metrics.json` (only when `--verbose` is enabled)
+When the input is a single file, outputs are written next to that file:
 
-Default output directory name: `outputs`
+```text
+/project/media/demo.mp4
+/project/media/outputs/demo.srt
+/project/media/outputs/demo.vtt
+/project/media/outputs/demo.json
+```
 
-Layout rules:
-
-- input is a directory/current directory:
-  - output root defaults to `<input_root>/outputs`
-- input is a single file:
-  - output root defaults to `<file_parent>/outputs`
-- recursive batch keeps relative directory structure
-- `--output-dir` overrides output root
-
-Example:
+When the input is a directory or the current directory, outputs are written
+under that input root:
 
 ```text
 /project/media/
@@ -260,148 +163,127 @@ Example:
   nested/b.json
 ```
 
-## JSON Contract (Practical)
+Use `--output-dir` to choose another output root.
 
-`json` output includes:
+## JSON Output
 
-- top-level transcription document:
-  - `source_path`
-  - `provider_name`
-  - `detected_language`
-  - `segments`
-  - `source_media`
-- export view:
-  - `granularity`
-  - `items`
+The JSON export keeps the readable transcript and the alignment data used to
+create subtitle views.
 
-`source_media` currently includes:
+Common top-level fields:
 
-- `prepared_audio_path`
-- `provider_metadata`:
-  - `processing_strategy`
-  - `window_count`
-  - `duration_sec`
-  - `quality_pass_count`
-  - `failed_window_count`
-  - `window_diagnostics`
+- `source_path`
+- `provider_name`
+- `detected_language`
+- `segments`
+- `source_media`
+- `granularity`
+- `items`
 
-## Real E2E Example (Current Repo)
+Each segment includes text, start/end timestamps, language metadata, optional
+speaker metadata, and token timing when available. `source_media` includes the
+prepared audio path, VAD metadata, and provider diagnostics such as processing
+strategy, duration, window counts, quality pass counts, and window diagnostics.
 
-Command used in this repository:
+## CLI Options
+
+| Option | Meaning |
+| --- | --- |
+| `inputs` | File, directory, or glob pattern. Defaults to the current directory. |
+| `--recursive` | Recursively scan directory inputs. |
+| `--output-dir PATH` | Override the default output directory root. |
+| `--granularity sentence` | Use segment boundaries for subtitle entries and JSON `items`. This is the default. |
+| `--granularity token` | Use token timing for subtitle entries and JSON `items`. |
+| `--no-vad` | Disable voice activity detection preprocessing. |
+| `--verbose` | Print detailed progress and write `<name>.metrics.json`. |
+| `--version` | Show the installed package version. |
+| `--help` | Show CLI help. |
+
+## VAD Preprocessing
+
+Voice activity detection is enabled by default. `easr` scans the prepared audio,
+finds likely speech ranges, groups them into padded chunks, and asks the
+provider to process only those ranges. Final subtitle timestamps remain on the
+original media timeline.
+
+Disable VAD when you want full-duration provider processing:
 
 ```bash
-uv run --python 3.14 --extra mlx easr tests/e2e/test1.mov --verbose
+easr ./demo.mp4 --no-vad
 ```
 
-Observed output files:
+If VAD fails, `easr` falls back to full-duration processing. If VAD succeeds and
+finds no speech, `easr` writes successful empty subtitle outputs.
 
-- `tests/e2e/outputs/test1.srt`
-- `tests/e2e/outputs/test1.vtt`
-- `tests/e2e/outputs/test1.json`
+## Shell Completion
 
-Observed sample stats from `test1.json`:
+Fish shell users can generate or install completions:
 
-- `window_count`: `3`
-- `failed_window_count`: `0`
-- `segments`: ~`49` (depends on current alignment behavior/model output)
+```bash
+easr completion fish
+easr completion install fish
+```
 
-Sample subtitle excerpt:
+The install command writes:
 
 ```text
-00:00:09,600 --> 00:00:17,640
-But despite all the buzz and hype, one of the things that's still underestimated by many people is their power as a developer too.
+~/.config/fish/completions/easr.fish
 ```
 
-## Common Commands
+Existing completion files at that path are overwritten.
 
-### Run unit tests
+## Runtime Behavior
 
-```bash
-PYTHONPATH=src uv run --python 3.14 python -m unittest discover -s tests -p 'test_*.py'
-```
-
-### Run a single focused test
-
-```bash
-PYTHONPATH=src uv run --python 3.14 python -m unittest tests.test_authority
-```
-
-### Dry-check CLI parsing/help
-
-```bash
-uv run --python 3.14 easr --help
-```
-
-### Token-level subtitle export
-
-```bash
-uv run --python 3.14 --extra mlx easr ./demo.mp4 --granularity token --verbose
-```
-
-### Export verbose metrics JSON for optimization
-
-```bash
-uv run --python 3.14 --extra mlx easr ./demo.mp4 --verbose
-```
-
-## Runtime Flow (What Happens Internally)
-
-For each media file:
-
-1. CLI discovers supported inputs (file/dir/glob).
-2. Environment preflight validates:
-   - `ffmpeg` and `ffprobe` availability
-   - MLX/Metal basic runtime check
-   - progress starts rendering in terminal (single-line by default)
-3. Media is normalized to mono 16 kHz WAV.
-4. Provider runs windowed ASR + alignment.
-5. Results are exported to `srt`, `vtt`, and `json`.
-6. When `--verbose` is enabled, `<name>.metrics.json` is also exported.
-
-## Exit Codes and Runtime Behavior
-
-- `0`: all discovered files processed successfully
-- `1`: no supported input found, preflight failed, or at least one file failed in batch
-
-Batch behavior:
-
-- files are processed one-by-one
+- exit code `0`: all discovered files processed successfully
+- exit code `1`: no supported input was found, environment preflight failed, or
+  at least one file failed in a batch
+- batch files are processed one by one
 - failures are reported per file to stderr
-- other files continue processing
+- other files continue processing after a per-file failure
+- the first run may be slower because model files are downloaded and cached
 
 ## Troubleshooting
 
-### `[easr] environment check failed: Missing required media dependency...`
+### Missing `ffmpeg` or `ffprobe`
 
-Cause: `ffmpeg` and/or `ffprobe` not found on `PATH`.
+Install the media tools and make sure they are visible from the shell running
+`easr`:
 
-Fix:
+```bash
+brew install ffmpeg
+which ffmpeg
+which ffprobe
+```
 
-- install both binaries
-- ensure they are visible in the shell used to run `easr`
+### MLX or Metal preflight failed
 
-### `[easr] environment check failed: MLX/Metal preflight failed...`
+Check that you are on Apple Silicon, using the expected Python environment, and
+installed the MLX runtime extra:
 
-Cause: MLX runtime could not initialize Metal backend (or crashed during preflight).
+```bash
+python3.14 -m pip install "echoalign-asr-mlx[mlx]"
+```
 
-Fix:
+For a source checkout:
 
-- verify Apple Silicon + supported macOS runtime
-- re-check Python/venv and `mlx` dependency installation
-- retry from a clean shell/session
+```bash
+uv sync --extra mlx
+uv run --python 3.14 --extra mlx easr --help
+```
 
 ### First run is slow
 
-Cause: model download and cache warm-up.
+This is expected when the Qwen3 model files are downloaded and the local cache
+is warmed. Later runs should be faster.
 
-Fix:
+## Current Limitations
 
-- expected on first run
-- later runs should be faster after cache is populated
+- Translation is not implemented.
+- Speaker diarization is not implemented.
+- Subtitle segmentation quality depends on model and alignment behavior.
+- The public CLI does not expose provider selection.
 
-## Notes and Scope
+## Developer Documentation
 
-- translation is out of scope in current phase
-- speaker diarization is not implemented
-- subtitle segmentation quality depends on model + alignment behavior
-- provider abstraction is in place for future backend extension
+Development setup, test commands, build instructions, and release notes live in
+[docs/development.md](docs/development.md).
