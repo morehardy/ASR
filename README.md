@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/asr-logo.png" alt="echoalign-asr-mlx logo" width="720">
+  <img src="https://raw.githubusercontent.com/morehardy/echoalign-asr-mlx/main/docs/assets/asr-logo.png" alt="echoalign-asr-mlx logo" width="720">
 </p>
 
 # echoalign-asr-mlx
