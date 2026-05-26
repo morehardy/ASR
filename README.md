@@ -4,17 +4,23 @@
 
 # echoalign-asr-mlx
 
+[![CI](https://github.com/morehardy/echoalign-asr-mlx/actions/workflows/ci.yml/badge.svg)](https://github.com/morehardy/echoalign-asr-mlx/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/echoalign-asr-mlx.svg)](https://pypi.org/project/echoalign-asr-mlx/)
+[![Python](https://img.shields.io/pypi/pyversions/echoalign-asr-mlx.svg)](https://pypi.org/project/echoalign-asr-mlx/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `easr` is a local Apple Silicon CLI that turns audio and video files into
 subtitle files (`.srt`, `.vtt`) and timestamp-aligned JSON.
 
-Use it when you want local transcription, readable subtitles, and
-machine-friendly alignment data without running a server.
+Use it when you want local speech recognition, forced alignment, readable
+subtitles, and machine-friendly timing data without running a server.
 
 Current scope:
 
 - runtime target: macOS on Apple Silicon
 - backend: MLX with Qwen3 ASR and Qwen3 ForcedAligner
 - output: SRT, WebVTT, and JSON
+- license: MIT
 - not included yet: translation, speaker diarization, Linux/Windows support
 
 ## What You Get
@@ -51,7 +57,7 @@ Default provider models:
 
 ## Installation
 
-Install from a published Python package:
+Install from PyPI:
 
 ```bash
 python3.14 -m pip install "echoalign-asr-mlx[mlx]"
@@ -283,7 +289,11 @@ is warmed. Later runs should be faster.
 - Subtitle segmentation quality depends on model and alignment behavior.
 - The public CLI does not expose provider selection.
 
-## Developer Documentation
+## Development and Community
 
-Development setup, test commands, build instructions, and release notes live in
-[docs/development.md](docs/development.md).
+- [Contributing guide](CONTRIBUTING.md)
+- [Development guide](docs/development.md)
+- [Roadmap](ROADMAP.md)
+- [Changelog](CHANGELOG.md)
+- [Security policy](SECURITY.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)

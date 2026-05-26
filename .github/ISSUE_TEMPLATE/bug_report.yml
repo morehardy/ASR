@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible problem with echoalign-asr-mlx.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve echoalign-asr-mlx. Please avoid attaching private media, credentials, or copyrighted material unless you have permission to share it.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Package version, Git tag, or commit SHA.
+      placeholder: "v0.4.0 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, Apple Silicon chip, and Python version.
+      placeholder: "macOS 15.x, M3 Pro, Python 3.14"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran.
+      render: bash
+      placeholder: "easr ./demo.mp4 --verbose"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Paste relevant terminal output. Remove private paths, tokens, and media names if needed.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I confirmed `ffmpeg` and `ffprobe` are on PATH.
+        - label: I tried a clean shell or fresh virtual environment.
+        - label: I can reproduce this with a non-private sample or synthetic fixture.
