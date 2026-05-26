@@ -5,6 +5,12 @@ from unittest.mock import patch
 
 import asr
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def read_pyproject() -> dict:
+    return tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
 
 class PackageMetadataTest(unittest.TestCase):
     def test_version_comes_from_installed_distribution_metadata(self) -> None:
@@ -20,13 +26,13 @@ class PackageMetadataTest(unittest.TestCase):
         self.assertTrue(asr.__version__)
 
     def test_mlx_extra_includes_torchcodec_for_silero_vad_audio_io(self) -> None:
-        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        pyproject = read_pyproject()
         mlx_dependencies = pyproject["project"]["optional-dependencies"]["mlx"]
 
         self.assertIn("torchcodec>=0.11.1", mlx_dependencies)
 
     def test_package_metadata_includes_discovery_fields(self) -> None:
-        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        pyproject = read_pyproject()
         project = pyproject["project"]
 
         self.assertIn("speech-recognition", project["keywords"])
