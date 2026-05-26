@@ -32,7 +32,7 @@ The current first-phase goal is:
 
 ## CLI Contract
 
-- Public command name: `asr`
+- Public command name: `easr`
 - Phase 1 user experience should feel like a single-command CLI.
 - If no input path is provided, the CLI must default to the current working directory.
 - The CLI must support:
@@ -54,7 +54,7 @@ Phase 1 should explicitly support these formats:
 
 ## Output Rules
 
-- Default output formats: `srt`, `vtt`, `json`, `txt`(txt do not have time stamp )
+- Default output formats: `srt`, `vtt`, `json`
 - Default overwrite behavior: overwrite existing outputs
 - Default output directory name: `outputs`
 - The CLI must support overriding the output directory through a flag such as `--output-dir`
@@ -71,7 +71,6 @@ Examples:
 
 - `/path/media/demo.mp4` -> `/path/media/outputs/demo.srt`
 - `/path/media/demo.mp4` -> `/path/media/outputs/demo.vtt`
-- `/path/media/demo.mp4` -> `/path/media/outputs/demo.txt`
 - `/path/media/demo.mp4` -> `/path/media/outputs/demo.json`
 - `/path/media/sub/a.wav` with input root `/path/media` -> `/path/media/outputs/sub/a.srt`
 

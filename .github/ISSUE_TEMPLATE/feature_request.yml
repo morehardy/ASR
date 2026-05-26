@@ -1,0 +1,53 @@
+name: Feature request
+description: Suggest an improvement or new workflow for echoalign-asr-mlx.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. The project is currently focused on local Apple Silicon transcription, subtitle export, and timestamp-aligned JSON.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or limitation should this solve?
+      placeholder: "I want to..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would the ideal behavior look like?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI behavior
+        - Subtitle export
+        - JSON contract
+        - Provider/runtime
+        - VAD or timing quality
+        - Documentation
+        - Packaging or release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What have you tried already, or what trade-offs should be considered?
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope checks
+      options:
+        - label: This can preserve the existing default output layout.
+        - label: This can preserve the timestamped JSON contract.
+        - label: This does not require sharing private or copyrighted media.

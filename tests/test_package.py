@@ -24,3 +24,22 @@ class PackageMetadataTest(unittest.TestCase):
         mlx_dependencies = pyproject["project"]["optional-dependencies"]["mlx"]
 
         self.assertIn("torchcodec>=0.11.1", mlx_dependencies)
+
+    def test_package_metadata_includes_discovery_fields(self) -> None:
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        project = pyproject["project"]
+
+        self.assertIn("speech-recognition", project["keywords"])
+        self.assertIn("subtitles", project["keywords"])
+        self.assertEqual(project["license"], "MIT")
+        self.assertIn("Operating System :: MacOS", project["classifiers"])
+        self.assertIn("License :: OSI Approved :: MIT License", project["classifiers"])
+        self.assertIn("Topic :: Multimedia :: Sound/Audio :: Speech", project["classifiers"])
+        self.assertEqual(
+            project["urls"]["Repository"],
+            "https://github.com/morehardy/echoalign-asr-mlx",
+        )
+        self.assertEqual(
+            project["urls"]["Issues"],
+            "https://github.com/morehardy/echoalign-asr-mlx/issues",
+        )
